@@ -41,6 +41,7 @@ from .deps.const import (
 
 from .deps.xiaomi_cloud_new import *
 from .deps.xiaomi_cloud_new import MiCloud
+from .deps.miot_coordinator import MiotCloudCoordinator
 from asyncio.exceptions import CancelledError
 
 _LOGGER = logging.getLogger(__name__)
@@ -60,6 +61,12 @@ CONFIG_SCHEMA = vol.Schema(
     },
     extra=vol.ALLOW_EXTRA,
 )
+
+SHORT_DELAY = 3
+LONG_DELAY = 5
+
+UPDATE_BETA_FLAG = False
+
 async def async_setup(hass, hassconfig):
     """Setup Component."""
     hass.data.setdefault(DOMAIN, {})
@@ -69,6 +76,8 @@ async def async_setup(hass, hassconfig):
     hass.data[DOMAIN].setdefault('entities', {})
     hass.data[DOMAIN].setdefault('configs', {})
     hass.data[DOMAIN].setdefault('miot_main_entity', {})
+    hass.data[DOMAIN].setdefault('micloud_devices', [])
+    hass.data[DOMAIN].setdefault('cloud_instance_list', [])
 
     component = EntityComponent(_LOGGER, DOMAIN, hass, SCAN_INTERVAL)
     hass.data[DOMAIN]['component'] = component
@@ -91,6 +100,8 @@ async def async_setup_entry(hass, entry):
                  CONF_CLOUD,
                  'cloud_write',
                  'devtype',
+                 'ett_id_migrated',
+                 'cloud_device_info',
                  ]:
         config[item] = entry.data.get(item)
     for item in [CONF_MAPPING,
@@ -126,29 +137,44 @@ async def async_setup_entry(hass, entry):
 
 async def async_unload_entry(hass, entry):
     if 'username' in entry.data:
-        hass.data[DOMAIN]['cloud_instance'] = None
-        hass.data[DOMAIN].pop('micloud_devices')
-        return True
+        # TODO
+        try:
+            hass.data[DOMAIN]['micloud_devices'] = []
+            for item in hass.data[DOMAIN]['cloud_instance_list']:
+                if item['username'] == entry.data['username']:
+                    del item
+                    return True
+            return False
+        except Exception as ex:
+            _LOGGER.error(ex)
+            return False
     else:
         entry_id = entry.entry_id
         unique_id = entry.unique_id
         hass.data[DOMAIN]['configs'].pop(entry_id)
         if unique_id:
             hass.data[DOMAIN]['configs'].pop(unique_id)
+        if type(entry.data.get('devtype')) == str:
+            hass.async_create_task(hass.config_entries.async_forward_entry_unload(entry, entry.data.get('devtype')))
+        else:
+            for t in entry.data.get('devtype'):
+                hass.async_create_task(hass.config_entries.async_forward_entry_unload(entry, t))
+
         return True
 
 async def _setup_micloud_entry(hass, config_entry):
     """Thanks to @AlexxIT """
     data: dict = config_entry.data.copy()
+    server_location = data.get('server_location') or 'cn'
 
     session = aiohttp_client.async_create_clientsession(hass)
     cloud = MiCloud(session)
-    hass.data[DOMAIN]['cloud_instance'] = cloud
+    cloud.svr = server_location
 
     if 'service_token' in data:
         # load devices with saved MiCloud auth
         cloud.auth = data
-        devices = await cloud.get_total_devices(['cn'])
+        devices = await cloud.get_total_devices([server_location])
     else:
         devices = None
 
@@ -159,13 +185,21 @@ async def _setup_micloud_entry(hass, config_entry):
             data.update(cloud.auth)
             hass.config_entries.async_update_entry(config_entry, data=data)
 
-            devices = await cloud.get_total_devices(['cn'])
+            devices = await cloud.get_total_devices([server_location])
 
             if devices is None:
                 _LOGGER.error("Can't load devices from MiCloud")
 
         else:
             _LOGGER.error("Can't login to MiCloud")
+    if userid := cloud.auth.get('user_id'):
+        # TODO don't allow login the same account twice
+        hass.data[DOMAIN]['cloud_instance_list'].append({
+            "user_id": userid,
+            "username": data['username'],
+            "cloud_instance": cloud,
+            "coordinator": MiotCloudCoordinator(hass, cloud)
+        })
 
     # load devices from or save to .storage
     filename = sanitize_filename(data['username'])
@@ -187,18 +221,6 @@ async def _setup_micloud_entry(hass, config_entry):
     else:
         hass.data[DOMAIN]['micloud_devices'] += devices
 
-    # default_devices = hass.data[DOMAIN]['config']['devices']
-    # gw_list = []
-    # for device in devices:
-    #     default_devices[device['did']] = {'device_name': device['name']}
-    #     if device['model'] == 'lumi.gateway.mgl03':
-    #         gw_list.append(device)
-
-    # hass.data[DOMAIN]['gateway_list'] = gw_list
-    # if gw_list:
-    #     hass.async_create_task(hass.config_entries.async_forward_entry_setup(
-    #             config_entry, 'alarm_control_panel'))
-
     return True
 
 class GenericMiotDevice(Entity):
@@ -207,22 +229,28 @@ class GenericMiotDevice(Entity):
     def __init__(self, device, config, device_info, hass = None, mi_type = None):
         """Initialize the entity."""
 
-        def setup_cloud(self, hass):
-            if cloud := hass.data[DOMAIN].get('cloud_instance'):
-                if cloud.auth.get('user_id') == self._cloud.get('userId'):
-                    _LOGGER.info(f"Xiaomi account was already logged in for {self._name}.")
-                    return cloud
-
-            _LOGGER.info(f"Setting up xiaomi account for {self._name}...")
-            mc = MiCloud(
-                aiohttp_client.async_get_clientsession(self._hass)
-            )
-            mc.login_by_credientals(
-                self._cloud.get('userId'),
-                self._cloud.get('serviceToken'),
-                self._cloud.get('ssecurity')
-            )
-            return mc
+        def setup_cloud(self, hass) -> tuple:
+            try:
+                return next((cloud['cloud_instance'], cloud['coordinator']) for cloud in hass.data[DOMAIN]['cloud_instance_list']
+                            if cloud['user_id'] == self._cloud.get('userId'))
+            except StopIteration:
+                _LOGGER.info(f"Setting up xiaomi account for {self._name}...")
+                mc = MiCloud(
+                    aiohttp_client.async_get_clientsession(self._hass)
+                )
+                mc.login_by_credientals(
+                    self._cloud.get('userId'),
+                    self._cloud.get('serviceToken'),
+                    self._cloud.get('ssecurity')
+                )
+                co = MiotCloudCoordinator(hass, mc)
+                hass.data[DOMAIN]['cloud_instance_list'].append({
+                    "user_id": self._cloud.get('userId'),
+                    "username": None,  # 不是从UI配置的用户，没有用户名
+                    "cloud_instance": mc,
+                    "coordinator": co
+                })
+                return (mc, co)
 
         self._device = device
         self._mi_type = mi_type
@@ -262,21 +290,33 @@ class GenericMiotDevice(Entity):
         self._name = config.get(CONF_NAME)
         self._update_instant = config.get(CONF_UPDATE_INSTANT)
         self._skip_update = False
-        self._delay_update = False
+        self._delay_update = 0
 
         self._model = device_info.model
         self._unique_id = "{}-{}-{}".format(
             device_info.model, device_info.mac_address, self._name
+        ) if not config.get('ett_id_migrated') else (
+            f"{device_info.model.split('.')[-1]}-cloud-{config.get(CONF_CLOUD)['did'][-6:]}" if config.get(CONF_CLOUD) else
+                f"{device_info.model.split('.')[-1]}-{device_info.mac_address.replace(':','')}"
         )
-        # self._icon = "mdi:flask-outline"
+        if config.get('ett_id_migrated'):
+            self._entity_id = self._unique_id
+            self.entity_id = f"{DOMAIN}.{self._entity_id}"
+        else:
+            self._entity_id = None
 
         self._hass = hass
         self._cloud = config.get(CONF_CLOUD)
         self._cloud_write = config.get('cloud_write')
         self._cloud_instance = None
+        self.coordinator = None
         if self._cloud:
-            self._cloud_instance = setup_cloud(self, hass)
+            c = setup_cloud(self, hass)
+            self._cloud_instance = c[0]
+            self.coordinator = c[1]
+            self.coordinator.add_fixed_by_mapping(self._cloud, self._mapping)
 
+        self._fail_count = 0
         self._available = None
         self._state = None
         self._assumed_state = False
@@ -284,7 +324,6 @@ class GenericMiotDevice(Entity):
             ATTR_MODEL: self._model,
             ATTR_FIRMWARE_VERSION: device_info.firmware_version,
             ATTR_HARDWARE_VERSION: device_info.hardware_version,
-            # ATTR_STATE_PROPERTY: self._state_property,
         }
         self._notified = False
         self._callbacks = set()
@@ -292,7 +331,7 @@ class GenericMiotDevice(Entity):
     @property
     def should_poll(self):
         """Poll the miio device."""
-        return True
+        return True if (not UPDATE_BETA_FLAG or not self._cloud) else False
 
     @property
     def unique_id(self):
@@ -378,14 +417,16 @@ class GenericMiotDevice(Entity):
                     p = {'params': [p]}
                     pp = json.dumps(p,separators=(',', ':'))
                     _LOGGER.info(f"Control {self._name} params: {pp}")
-                    results = await self._cloud_instance.set_props(pp)
+                    results = await self._cloud_instance.set_props(pp, self._cloud.get("server_location"))
                     if results:
                         if r := results.get('result'):
                             for item in r:
-                                if item['code'] != 0:
+                                if item['code'] == 1:
+                                    self._delay_update = LONG_DELAY
+                                elif item['code'] != 0:
                                     _LOGGER.error(f"Control {self._name} by cloud failed: {r}")
                                     return False
-                            self._delay_update = True
+                            self._skip_update = True
                             return True
                     return False
                 else:
@@ -396,14 +437,16 @@ class GenericMiotDevice(Entity):
                     pp = {'params': p}
                     ppp = json.dumps(pp,separators=(',', ':'))
                     _LOGGER.info(f"Control {self._name} params: {ppp}")
-                    results = await self._cloud_instance.set_props(ppp)
+                    results = await self._cloud_instance.set_props(ppp, self._cloud.get("server_location"))
                     if results:
                         if r := results.get('result'):
                             for item in r:
-                                if item['code'] != 0:
+                                if item['code'] == 1:
+                                    self._delay_update = LONG_DELAY
+                                elif item['code'] != 0:
                                     _LOGGER.error(f"Control {self._name} by cloud failed: {r}")
                                     return False
-                            self._delay_update = True
+                            self._skip_update = True
                             return True
                     return False
 
@@ -433,7 +476,7 @@ class GenericMiotDevice(Entity):
                 result = await self._cloud_instance.call_action(
                     json.dumps({
                         'params': params or []
-                    })
+                    }), self._cloud.get("server_location")
                 )
                 if result:
                     return True
@@ -442,15 +485,15 @@ class GenericMiotDevice(Entity):
             return False
 
     async def async_update(self):
-        # _LOGGER.error(self._hass.data[DOMAIN])
         """Fetch state from the device."""
         # On state change some devices doesn't provide the new state immediately.
         if self._update_instant is False or self._skip_update:
             self._skip_update = False
+            self._delay_update = 0
             return
-        if self._delay_update:
-            await asyncio.sleep(3)
-            self._delay_update = False
+        if self._delay_update != 0:
+            await asyncio.sleep(self._delay_update)
+            self._delay_update = 0
         try:
             if not self._cloud:
                 response = await self.hass.async_add_job(
@@ -505,7 +548,7 @@ class GenericMiotDevice(Entity):
                         data1['params'].append({**{'did':self._cloud.get("did")},**value})
                 data2 = json.dumps(data1,separators=(',', ':'))
 
-                a = await self._cloud_instance.get_props(data2)
+                a = await self._cloud_instance.get_props(data2, self._cloud.get("server_location"))
 
                 dict1 = {}
                 statedict = {}
@@ -527,12 +570,19 @@ class GenericMiotDevice(Entity):
                 else:
                     pass
 
+            self._fail_count = 0
             self._state_attrs.update(statedict)
-            await self.publish_updates()
+            self._handle_platform_specific_attrs()
+            self.publish_updates()
 
         except DeviceException as ex:
-            self._available = False
-            _LOGGER.error("Got exception while fetching %s 's state: %s", self._name, ex)
+            if self._fail_count < 3:
+                self._fail_count += 1
+                self._available = False
+                _LOGGER.info("Got exception while fetching %s 's state: %s. Count %d", self._name, ex, self._fail_count)
+            else:
+                self._available = False
+                _LOGGER.error("Got exception while fetching %s 's state: %s", self._name, ex)
 
     def get_key_by_value(self, d:dict, value):
         try:
@@ -542,7 +592,7 @@ class GenericMiotDevice(Entity):
             return None
 
     def convert_value(self, value, param, dir = True, valuerange = None):
-        if not type(value) == int and not type(value) == float:
+        if not type(value) == int and not type(value) == float and not type(value) == tuple:
             _LOGGER.debug(f"Converting {param} value ({value}) is not a number but {type(value)}, trying to convert to number")
             try:
                 value = float(value)
@@ -598,10 +648,48 @@ class GenericMiotDevice(Entity):
         """Remove previously registered callback."""
         self._callbacks.discard(callback)
 
-    async def publish_updates(self):
+    def publish_updates(self):
         """Schedule call all registered callbacks."""
         for callback in self._callbacks:
             callback()
+
+    async def async_added_to_hass(self) -> None:
+        """When entity is added to hass."""
+        if UPDATE_BETA_FLAG and self.coordinator:
+            self.async_on_remove(
+                self.coordinator.async_add_listener(self._handle_coordinator_update)
+            )
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        dict1 = {}
+        statedict = {}
+        if self._cloud['did'] in self.coordinator.data:
+            self._available = True
+            for item in self.coordinator.data[self._cloud['did']]:
+                if dict1.get(item['siid']):
+                    dict1[item['siid']][item['piid']] = item.get('value')
+                else:
+                    dict1[item['siid']] = {}
+                    dict1[item['siid']][item['piid']] = item.get('value')
+
+            for key, value in self._mapping.items():
+                try:
+                    statedict[key] = dict1[value['siid']][value['piid']]
+                except KeyError:
+                    statedict[key] = None
+        else:
+            pass
+
+        self._state_attrs.update(statedict)
+        self._handle_platform_specific_attrs()
+        self.async_write_ha_state()
+        self.publish_updates()
+
+    def _handle_platform_specific_attrs(self):
+        pass
+
 
 class ToggleableMiotDevice(GenericMiotDevice, ToggleEntity):
     def __init__(self, device, config, device_info, hass = None, mi_type = None):
@@ -623,29 +711,6 @@ class ToggleableMiotDevice(GenericMiotDevice, ToggleEntity):
             self._state = False
             self.async_write_ha_state()
 
-    async def async_update(self):
-        # _LOGGER.error("Update!!!!!!!")
-        await super().async_update()
-        state = self._state_attrs.get(self._did_prefix + 'switch_status')
-        _LOGGER.debug("%s 's new state: %s", self._name, state)
-
-        if state == self._ctrl_params['switch_status']['power_on']:
-            self._state = True
-        elif state == self._ctrl_params['switch_status']['power_off']:
-            self._state = False
-        elif not self.assumed_state:
-            _LOGGER.warning(
-                "New state (%s) of %s doesn't match expected values: %s/%s",
-                state, self._name,
-                self._ctrl_params['switch_status']['power_on'],
-                self._ctrl_params['switch_status']['power_off'],
-            )
-            self._state = None
-
-        self._state_attrs.update({ATTR_STATE_VALUE: state})
-
-        await self.publish_updates()
-
     @property
     def assumed_state(self):
         """Return true if unable to access real state of entity."""
@@ -659,13 +724,38 @@ class ToggleableMiotDevice(GenericMiotDevice, ToggleEntity):
     def is_on(self):
         return self._state
 
+    def _handle_platform_specific_attrs(self):
+        super()._handle_platform_specific_attrs()
+        state = self._state_attrs.get(self._did_prefix + 'switch_status')
+        _LOGGER.debug("%s 's new state: %s", self._name, state)
+        if 'switch_status' in self._ctrl_params:
+            if state == self._ctrl_params['switch_status']['power_on']:
+                self._state = True
+            elif state == self._ctrl_params['switch_status']['power_off']:
+                self._state = False
+            elif not self.assumed_state:
+                _LOGGER.warning(
+                    "New state (%s) of %s doesn't match expected values: %s/%s",
+                    state, self._name,
+                    self._ctrl_params['switch_status']['power_on'],
+                    self._ctrl_params['switch_status']['power_off'],
+                )
+                self._state = None
+        else:
+            self._state = None
+
+        self._state_attrs.update({ATTR_STATE_VALUE: state})
+        # await self.publish_updates()
+
 
 class MiotSubDevice(Entity):
     """This part is modified from @al-one 's."""
     # should_poll = False
     def __init__(self, parent_device, mapping, params, mitype):
         self._unique_id = f'{parent_device.unique_id}-{mitype}'
-        self._name = f'{parent_device.name} {mitype.capitalize()}'
+        self._entity_id = f"{parent_device._entity_id}-{mitype}"
+        self.entity_id = f"{DOMAIN}.{self._entity_id}"
+        self._name = f'{parent_device.name} {mitype.replace("_", " ").title()}'
         self._state = STATE_UNKNOWN
         self._available = True
         self._parent_device = parent_device
@@ -673,7 +763,7 @@ class MiotSubDevice(Entity):
         self._mapping = mapping
         self._ctrl_params = params
         self._mitype = mitype
-        self._did_prefix= f"{mitype}_" if mitype else ""
+        self._did_prefix= f"{mitype[:10]}_" if mitype else ""
         self._skip_update = False
 
         self.convert_value = parent_device.convert_value
@@ -697,7 +787,6 @@ class MiotSubDevice(Entity):
 
     @property
     def device_state_attributes(self):
-        # return self._state_attrs
         try:
             return self._parent_device.device_state_attributes or {}
         except:
@@ -756,7 +845,6 @@ class MiotSubToggleableDevice(MiotSubDevice):
 
     @property
     def state(self):
-        # return STATE_ON if self._state else STATE_OFF
         try:
             return STATE_ON if self.device_state_attributes.get(f"{self._did_prefix}switch_status") else STATE_OFF
         except:
@@ -768,26 +856,9 @@ def sanitize_filename(s: str):
     filename = filename.replace(' ','_')
     return filename
 
-async def get_dev_info(hass, did):
-    cloud = hass.data[DOMAIN].get('cloud_instance')
-    if not cloud:
-        return None
-    data1 = {}
-    data1['datasource'] = 1
-    data1['params'] = [
-        {"did": str(did), "siid": 1, "piid": 1},
-        {"did": str(did), "siid": 1, "piid": 2},
-        {"did": str(did), "siid": 1, "piid": 3},
-        {"did": str(did), "siid": 1, "piid": 4},
-    ]
-
-    data2 = json.dumps(data1,separators=(',', ':'))
-
-    return await cloud.get_props(data2)
-
 @dataclass
 class dev_info:
     model             : str
-    mac_address       : str
+    mac_address       : str     # Not available for cloud
     firmware_version  : str
-    hardware_version  : str
+    hardware_version  : str     # Not available for cloud

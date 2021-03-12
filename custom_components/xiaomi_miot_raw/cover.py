@@ -25,7 +25,7 @@ from miio.exceptions import DeviceException
 from miio.miot_device import MiotDevice
 
 import copy
-from . import GenericMiotDevice, get_dev_info, dev_info
+from . import GenericMiotDevice, dev_info
 from .deps.const import (
     DOMAIN,
     CONF_UPDATE_INSTANT,
@@ -105,17 +105,16 @@ async def async_setup_platform(hass, config, async_add_devices, discovery_info=N
                 _LOGGER.warn(de)
                 raise PlatformNotReady
             else:
-                try:
-                    devinfo = await get_dev_info(hass, config.get(CONF_CLOUD)['did'])
+                if not (di := config.get('cloud_device_info')):
+                    _LOGGER.error(f"未能获取到设备信息，请删除 {config.get(CONF_NAME)} 重新配置。")
+                    raise PlatformNotReady
+                else:
                     device_info = dev_info(
-                        devinfo['result'][1]['value'],
-                        token,
-                        devinfo['result'][3]['value'],
+                        di['model'],
+                        di['mac'],
+                        di['fw_version'],
                         ""
                     )
-                except Exception as ex:
-                    _LOGGER.error(f"Failed to get device info for {config.get(CONF_NAME)}")
-                    device_info = dev_info(host,token,"","")
         device = MiotCover(miio_device, config, device_info, hass, main_mi_type)
 
         _LOGGER.info(f"{main_mi_type} is the main device of {host}.")
@@ -142,6 +141,11 @@ class MiotCover(GenericMiotDevice, CoverEntity):
         self._throttle1 = Throttle(timedelta(seconds=1))(self._async_update)
         self._throttle10 = Throttle(timedelta(seconds=10))(self._async_update)
         self.async_update = self._throttle10
+
+    @property
+    def should_poll(self):
+        """The cover should always be pulled."""
+        return True
 
     @property
     def available(self):
@@ -190,9 +194,9 @@ class MiotCover(GenericMiotDevice, CoverEntity):
             # self._skip_update = True
             try:
                 self._action = self._ctrl_params['motor_status']['open']
-            except KeyError:
-                return None
-
+            except KeyError as ex:
+                _LOGGER.error(ex)
+            self.async_write_ha_state()
             self.async_update = self._throttle1
             self.schedule_update_ha_state(force_refresh=True)
 
@@ -203,8 +207,8 @@ class MiotCover(GenericMiotDevice, CoverEntity):
             try:
                 self._action = self._ctrl_params['motor_status']['close']
             except KeyError:
-                return None
-            # self._skip_update = True
+                pass
+            self.async_write_ha_state()
             self.async_update = self._throttle1
             self.schedule_update_ha_state(force_refresh=True)
 
@@ -212,8 +216,7 @@ class MiotCover(GenericMiotDevice, CoverEntity):
         """Close the cover."""
         result = await self.set_property_new(self._did_prefix + "motor_control",self._ctrl_params['motor_control']['stop'])
         if result:
-            # self._skip_update = True
-            pass
+            self.async_write_ha_state()
 
     async def async_set_cover_position(self, **kwargs):
         """Set the cover."""
@@ -222,11 +225,17 @@ class MiotCover(GenericMiotDevice, CoverEntity):
         if result:
             self._skip_update = True
 
-    async def _async_update(self):
-        await super().async_update()
+    def _handle_platform_specific_attrs(self):
+        super()._handle_platform_specific_attrs()
         self._current_position = self._state_attrs.get(self._did_prefix + 'current_position')
-        self._action = self._state_attrs.get(self._did_prefix + 'motor_status')
         if self.is_closing or self.is_opening:
             self.async_update = self._throttle1
         else:
             self.async_update = self._throttle10
+        self._action = self._state_attrs.get(self._did_prefix + 'motor_status')
+
+    async def _async_update(self):
+        if self._update_instant is False or self._skip_update:
+            self._skip_update = False
+            return
+        await super().async_update()

@@ -280,9 +280,8 @@ class MiotMediaPlayer(GenericMiotDevice, MediaPlayerEntity):
         """Return the volume level of the media player (0..1)."""
         return self._volume_level
 
-    async def async_update(self):
-        """Fetch state from the device."""
-        await super().async_update()
+    def _handle_platform_specific_attrs(self):
+        super()._handle_platform_specific_attrs()
     #     player_state = self._state_attrs.get(self._did_prefix + 'playing_state')
     #     if player_state is not None and self._ctrl_params.get('playing_state'):
     #         if player_state == self._ctrl_params['playing_state'].get('paused'):
@@ -296,4 +295,3 @@ class MiotMediaPlayer(GenericMiotDevice, MediaPlayerEntity):
             self._state_attrs.get(self._did_prefix + 'volume') or 0,
             'volume', False, self._ctrl_params['volume']['value_range']
         )
-

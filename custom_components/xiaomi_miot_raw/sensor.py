@@ -15,7 +15,7 @@ from miio.exceptions import DeviceException
 from miio.miot_device import MiotDevice
 
 from datetime import timedelta
-from . import GenericMiotDevice, MiotSubDevice, get_dev_info, dev_info
+from . import GenericMiotDevice, MiotSubDevice, dev_info
 from .deps.const import (
     DOMAIN,
     CONF_UPDATE_INSTANT,
@@ -51,6 +51,21 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
 ATTR_PROPERTIES = "properties"
 ATTR_SENSOR_PROPERTY = "sensor_property"
 SCAN_INTERVAL = timedelta(seconds=5)
+
+DEVCLASS_MAPPING = {
+    "battery"         : ["battery"],
+    "humidity"        : ["humidity"],
+    "illuminance"     : ["illuminance"],
+    "signal_strength" : ["signal_strength"],
+    "temperature"     : ["temperature"],
+    "timestamp"       : ["timestamp"],
+    "power"           : ["electric_power"],
+    "pressure"        : ["pressure"],
+    "current"         : ["electric_current"],
+    "energy"          : ["power_consumption"],
+    "power_factor"    : ["power_factor"],
+    "voltage"         : ["voltage"],
+}
 # pylint: disable=unused-argument
 @asyncio.coroutine
 async def async_setup_platform(hass, config, async_add_devices, discovery_info=None):
@@ -87,7 +102,10 @@ async def async_setup_platform(hass, config, async_add_devices, discovery_info=N
         for k,v in mapping.items():
             for kk,vv in v.items():
                 mappingnew[f"{k[:10]}_{kk}"] = vv
-
+        for k,v in params.items():
+            if k in MAP[TYPE]:
+                for kk,vv in v.items():
+                    paramsnew[f"{k[:10]}_{kk}"] = vv
         _LOGGER.info("Initializing %s with host %s (token %s...)", config.get(CONF_NAME), host, token[:5])
 
         if type(params) == OrderedDict:
@@ -111,23 +129,36 @@ async def async_setup_platform(hass, config, async_add_devices, discovery_info=N
                 _LOGGER.warn(de)
                 raise PlatformNotReady
             else:
-                try:
-                    devinfo = await get_dev_info(hass, config.get(CONF_CLOUD)['did'])
+                if not (di := config.get('cloud_device_info')):
+                    _LOGGER.error(f"未能获取到设备信息，请删除 {config.get(CONF_NAME)} 重新配置。")
+                    raise PlatformNotReady
+                else:
                     device_info = dev_info(
-                        devinfo['result'][1]['value'],
-                        token,
-                        devinfo['result'][3]['value'],
+                        di['model'],
+                        di['mac'],
+                        di['fw_version'],
                         ""
                     )
-                except Exception as ex:
-                    _LOGGER.error(f"Failed to get device info for {config.get(CONF_NAME)}")
-                    device_info = dev_info(host,token,"","")
         device = MiotSensor(miio_device, config, device_info, hass, main_mi_type)
-
+        devices = [device]
         _LOGGER.info(f"{main_mi_type} is the main device of {host}.")
         hass.data[DOMAIN]['miot_main_entity'][host] = device
         hass.data[DOMAIN]['entities'][device.unique_id] = device
-        async_add_devices([device], update_before_add=True)
+        if main_mi_type:
+            if params[main_mi_type].get('show_individual_sensor'):
+                for k in mappingnew.keys():
+                    if k in paramsnew:
+                        unit = paramsnew[k].get('unit')
+                        format_ = paramsnew[k].get('format')
+                    else:
+                        unit = format_ = None
+
+                    devices.append(MiotSubSensor(
+                        device, mappingnew, paramsnew, main_mi_type,
+                        {'sensor_property': k, CONF_SENSOR_UNIT: unit}
+                    ))
+        async_add_devices(devices, update_before_add=True)
+
     if other_mi_type:
         retry_time = 1
         while True:
@@ -162,6 +193,9 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     config = hass.data[DOMAIN]['configs'].get(config_entry.entry_id, dict(config_entry.data))
     await async_setup_platform(hass, config, async_add_entities)
 
+async def async_unload_entry(hass, config_entry, async_add_entities):
+    return True
+
 class MiotSensor(GenericMiotDevice):
     def __init__(self, device, config, device_info, hass = None, mi_type = None):
         GenericMiotDevice.__init__(self, device, config, device_info, hass, mi_type)
@@ -174,8 +208,13 @@ class MiotSensor(GenericMiotDevice):
         """Return the state of the device."""
         return self._state
 
-    async def async_update(self):
-        await super().async_update()
+    @property
+    def unit_of_measurement(self):
+        """Return the unit of measurement of this entity, if any."""
+        return self._unit_of_measurement
+
+    def _handle_platform_specific_attrs(self):
+        super()._handle_platform_specific_attrs()
         state = self._state_attrs
         if self._sensor_property is not None:
             self._state = state.get(self._sensor_property)
@@ -186,17 +225,16 @@ class MiotSensor(GenericMiotDevice):
                 _LOGGER.error(ex)
                 self._state = None
 
-    @property
-    def unit_of_measurement(self):
-        """Return the unit of measurement of this entity, if any."""
-        return self._unit_of_measurement
-
 class MiotSubSensor(MiotSubDevice):
     def __init__(self, parent_device, mapping, params, mitype, others={}):
         super().__init__(parent_device, mapping, params, mitype)
         self._sensor_property = others.get('sensor_property')
+        self.entity_id = f"{DOMAIN}.{parent_device._entity_id}-{others.get('sensor_property').split('_')[-1]}"
         try:
-            self._unit_of_measurement = UNIT_MAPPING[params[self._sensor_property]['unit']]
+            if u := others.get(CONF_SENSOR_UNIT):
+                self._unit_of_measurement = UNIT_MAPPING.get(u) or u
+            else:
+                self._unit_of_measurement = UNIT_MAPPING.get(params[self._sensor_property]['unit']) or params[self._sensor_property]['unit']
         except:
             self._unit_of_measurement = None
 
@@ -223,6 +261,13 @@ class MiotSubSensor(MiotSubDevice):
         """Return the unit of measurement of this entity, if any."""
         return self._unit_of_measurement
 
+    @property
+    def device_class(self):
+        """Return the device class of the sensor."""
+        try:
+            return next(k for k,v in DEVCLASS_MAPPING.items() for item in v if item in self._sensor_property)
+        except StopIteration:
+            return None
 
     @property
     def unique_id(self):
@@ -233,3 +278,4 @@ class MiotSubSensor(MiotSubDevice):
     def name(self):
         """Return the name of this entity, if any."""
         return f"{self._parent_device.name} {self._sensor_property.replace('_', ' ').capitalize()}"
+

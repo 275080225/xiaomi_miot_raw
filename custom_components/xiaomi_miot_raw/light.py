@@ -22,7 +22,7 @@ from miio.device import Device
 from miio.exceptions import DeviceException
 from miio.miot_device import MiotDevice
 
-from . import GenericMiotDevice, ToggleableMiotDevice, MiotSubToggleableDevice, get_dev_info, dev_info
+from . import GenericMiotDevice, ToggleableMiotDevice, MiotSubToggleableDevice, dev_info
 from .deps.const import (
     DOMAIN,
     CONF_UPDATE_INSTANT,
@@ -107,17 +107,16 @@ async def async_setup_platform(hass, config, async_add_devices, discovery_info=N
                 _LOGGER.warn(de)
                 raise PlatformNotReady
             else:
-                try:
-                    devinfo = await get_dev_info(hass, config.get(CONF_CLOUD)['did'])
+                if not (di := config.get('cloud_device_info')):
+                    _LOGGER.error(f"未能获取到设备信息，请删除 {config.get(CONF_NAME)} 重新配置。")
+                    raise PlatformNotReady
+                else:
                     device_info = dev_info(
-                        devinfo['result'][1]['value'],
-                        token,
-                        devinfo['result'][3]['value'],
+                        di['model'],
+                        di['mac'],
+                        di['fw_version'],
                         ""
                     )
-                except Exception as ex:
-                    _LOGGER.error(f"Failed to get device info for {config.get(CONF_NAME)}")
-                    device_info = dev_info(host,token,"","")
         device = MiotLight(miio_device, config, device_info, hass, main_mi_type)
 
         _LOGGER.info(f"{main_mi_type} is the main device of {host}.")
@@ -146,6 +145,9 @@ async def async_setup_platform(hass, config, async_add_devices, discovery_info=N
         devices = []
 
         for item in other_mi_type:
+            if item == "indicator_light":
+                if not params[item].get('enabled'):
+                    continue
             devices.append(MiotSubLight(parent_device, mapping.get(item), params.get(item), item))
         async_add_devices(devices, update_before_add=True)
 
@@ -211,6 +213,7 @@ class MiotLight(ToggleableMiotDevice, LightEntity):
 
         if result:
             self._state = True
+            self.async_write_ha_state()
 
     @property
     def color_temp(self):
@@ -246,10 +249,8 @@ class MiotLight(ToggleableMiotDevice, LightEntity):
         """Return the hs color value."""
         return self._color
 
-    async def async_update(self):
-        """Fetch state from the device."""
-        # On state change some devices doesn't provide the new state immediately.
-        await super().async_update()
+    def _handle_platform_specific_attrs(self):
+        super()._handle_platform_specific_attrs()
         try:
             self._brightness = self.convert_value(self._state_attrs[self._did_prefix + 'brightness'],"brightness",False,self._ctrl_params['brightness']['value_range'])
         except KeyError: pass

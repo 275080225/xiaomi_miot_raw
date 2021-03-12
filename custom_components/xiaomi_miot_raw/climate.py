@@ -21,7 +21,7 @@ from miio.exceptions import DeviceException
 from miio.miot_device import MiotDevice
 
 import copy
-from . import GenericMiotDevice, ToggleableMiotDevice, get_dev_info, dev_info
+from . import GenericMiotDevice, ToggleableMiotDevice, dev_info
 from .deps.const import (
     DOMAIN,
     CONF_UPDATE_INSTANT,
@@ -52,13 +52,20 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
 
 HVAC_MAPPING = {
     HVAC_MODE_OFF:  ['Off', 'Idle', 'None'],
-    HVAC_MODE_AUTO: ['Auto'],
+    HVAC_MODE_AUTO: ['Auto', 'Auto-tempature'],
     HVAC_MODE_COOL: ['Cool'],
     HVAC_MODE_HEAT: ['Heat'],
     HVAC_MODE_DRY:  ['Dry'],
-    HVAC_MODE_FAN_ONLY: ['Fan'],
+    HVAC_MODE_FAN_ONLY: ['Fan', 'Fan-tempature'],
     HVAC_MODE_HEAT_COOL:['HeatCool'],
 }
+
+SWING_MAPPING = [
+    "Off",
+    "Vertical",
+    "Horizontal",
+    "Both"
+]
 
 SCAN_INTERVAL = timedelta(seconds=10)
 # pylint: disable=unused-argument
@@ -112,17 +119,16 @@ async def async_setup_platform(hass, config, async_add_devices, discovery_info=N
                 _LOGGER.warn(de)
                 raise PlatformNotReady
             else:
-                try:
-                    devinfo = await get_dev_info(hass, config.get(CONF_CLOUD)['did'])
+                if not (di := config.get('cloud_device_info')):
+                    _LOGGER.error(f"未能获取到设备信息，请删除 {config.get(CONF_NAME)} 重新配置。")
+                    raise PlatformNotReady
+                else:
                     device_info = dev_info(
-                        devinfo['result'][1]['value'],
-                        token,
-                        devinfo['result'][3]['value'],
+                        di['model'],
+                        di['mac'],
+                        di['fw_version'],
                         ""
                     )
-                except Exception as ex:
-                    _LOGGER.error(f"Failed to get device info for {config.get(CONF_NAME)}")
-                    device_info = dev_info(host,token,"","")
         device = MiotClimate(miio_device, config, device_info, hass, main_mi_type)
 
         _LOGGER.info(f"{main_mi_type} is the main device of {host}.")
@@ -135,6 +141,9 @@ async def async_setup_platform(hass, config, async_add_devices, discovery_info=N
 async def async_setup_entry(hass, config_entry, async_add_entities):
     config = hass.data[DOMAIN]['configs'].get(config_entry.entry_id, dict(config_entry.data))
     await async_setup_platform(hass, config, async_add_entities)
+
+async def async_unload_entry(hass, config_entry, async_add_entities):
+    return True
 
 class MiotClimate(ToggleableMiotDevice, ClimateEntity):
     def __init__(self, device, config, device_info, hass, main_mi_type):
@@ -152,13 +161,19 @@ class MiotClimate(ToggleableMiotDevice, ClimateEntity):
         self._hvac_mode = None
         self._aux = None
         self._current_swing_mode = None
-        self._fan_modes = ["On Low", "On High", "Auto Low", "Auto High", "Off"]
+        self._fan_modes = []
         self._hvac_modes = None
-        self._swing_modes = ["Auto", "1", "2", "3", "Off"]
-        try:
-            self._state_attrs.update({"min_temp":self._ctrl_params['target_temperature']['value_range'][0], "max_temp":self._ctrl_params['target_temperature']['value_range'][1]})
-        except:
-            pass
+        self._swing_modes = []
+        if self._did_prefix + 'vertical_swing' in self._mapping and \
+            self._did_prefix + 'horizontal_swing' in self._mapping:
+                self._swing_modes = ["Off", "Vertical", "Horizontal", "Both"]
+        elif self._did_prefix + 'vertical_swing' in self._mapping and \
+            not self._did_prefix + 'horizontal_swing' in self._mapping:
+                self._swing_modes = ["Off", "Vertical"]
+        elif not self._did_prefix + 'vertical_swing' in self._mapping and \
+            self._did_prefix + 'horizontal_swing' in self._mapping:
+                self._swing_modes = ["Off", "Horizontal"]
+
         try:
             self._target_temperature_step = self._ctrl_params['target_temperature']['value_range'][2]
         except:
@@ -176,8 +191,8 @@ class MiotClimate(ToggleableMiotDevice, ClimateEntity):
             s |= SUPPORT_PRESET_MODE
         if self._did_prefix + 'target_humidity' in self._mapping:
             s |= SUPPORT_TARGET_HUMIDITY
-        # if self._did_prefix + 'vertical_swing' in self._mapping or 'horizontal_swing' in self._mapping:
-        #     s |= SUPPORT_SWING_MODE
+        if self._swing_modes:
+            s |= SUPPORT_SWING_MODE
         # if 'aux_heat' in self._mapping:
         #     s |= SUPPORT_AUX_HEAT
         # if 'temprature_range' in self._mapping:
@@ -217,6 +232,16 @@ class MiotClimate(ToggleableMiotDevice, ClimateEntity):
         return self._ctrl_params['target_temperature']['value_range'][0]
 
     @property
+    def min_temp(self):
+        """Return the lowbound target temperature we try to reach."""
+        return self._ctrl_params['target_temperature']['value_range'][0]
+
+    @property
+    def max_temp(self):
+        """Return the lowbound target temperature we try to reach."""
+        return self._ctrl_params['target_temperature']['value_range'][1]
+
+    @property
     def current_humidity(self):
         """Return the current humidity."""
         return self._current_humidity
@@ -246,7 +271,10 @@ class MiotClimate(ToggleableMiotDevice, ClimateEntity):
     @property
     def hvac_modes(self):
         """Return the list of available operation modes."""
-        return [next(a[0] for a in HVAC_MAPPING.items() if b in a[1]) for b in self._ctrl_params['mode']] + [HVAC_MODE_OFF]
+        try:
+            return [next(a[0] for a in HVAC_MAPPING.items() if b in a[1]) for b in self._ctrl_params['mode']] + [HVAC_MODE_OFF]
+        except:
+            _LOGGER.error(f"Modes {self._ctrl_params['mode']} contains unsupported ones. Please report this message to the developer.")
 
     @property
     def preset_mode(self):
@@ -291,13 +319,6 @@ class MiotClimate(ToggleableMiotDevice, ClimateEntity):
             if result:
                 self._target_temperature = kwargs.get(ATTR_TEMPERATURE)
                 self.async_write_ha_state()
-        # if (
-        #     kwargs.get(ATTR_TARGET_TEMP_HIGH) is not None
-        #     and kwargs.get(ATTR_TARGET_TEMP_LOW) is not None
-        # ):
-        #     self._target_temperature_high = kwargs.get(ATTR_TARGET_TEMP_HIGH)
-        #     self._target_temperature_low = kwargs.get(ATTR_TARGET_TEMP_LOW)
-        # self.async_write_ha_state()
 
     async def async_set_humidity(self, humidity):
         """Set new humidity level."""
@@ -306,8 +327,22 @@ class MiotClimate(ToggleableMiotDevice, ClimateEntity):
 
     async def async_set_swing_mode(self, swing_mode):
         """Set new swing mode."""
-        self._current_swing_mode = swing_mode
-        self.async_write_ha_state()
+        swm = SWING_MAPPING.index(swing_mode)
+        parameters = []
+        if 'Vertical' in self._swing_modes:
+            parameters.append({
+                **{'did': self._did_prefix + "vertical_swing", 'value': bool(swm & 1)},
+                **(self._mapping[self._did_prefix + 'vertical_swing'])
+            })
+        if 'Horizontal' in self._swing_modes:
+            parameters.append({
+                **{'did': self._did_prefix + "horizontal_swing", 'value': bool(swm >> 1)},
+                **(self._mapping[self._did_prefix + 'horizontal_swing'])
+            })
+        result = await self.set_property_new(multiparams = parameters)
+        if result:
+            self._current_swing_mode = swing_mode
+            self.async_write_ha_state()
 
     async def async_set_fan_mode(self, fan_mode):
         """Set new fan mode."""
@@ -318,8 +353,12 @@ class MiotClimate(ToggleableMiotDevice, ClimateEntity):
         if hvac_mode == HVAC_MODE_OFF:
             result = await self.async_turn_off()
         else:
+            parameters = []
             if not self.is_on:
-                await self.async_turn_on()
+                parameters.append({
+                    **{'did': self._did_prefix + "switch_status", 'value': self._ctrl_params['switch_status']['power_on']},
+                    **(self._mapping[self._did_prefix + 'switch_status'])
+                })
 
             modevalue = None
             for item in HVAC_MAPPING[hvac_mode]:
@@ -330,7 +369,11 @@ class MiotClimate(ToggleableMiotDevice, ClimateEntity):
                 _LOGGER.error(f"Failed to set {self._name} to mode {hvac_mode} because cannot find it in params.")
                 return False
 
-            result = await self.set_property_new(self._did_prefix + "mode", modevalue)
+            parameters.append({
+                **{'did': self._did_prefix + "mode", 'value': modevalue},
+                **(self._mapping[self._did_prefix + 'mode'])
+            })
+            result = await self.set_property_new(multiparams = parameters)
             if result:
                 self._hvac_mode = hvac_mode
                 self.async_write_ha_state()
@@ -350,16 +393,26 @@ class MiotClimate(ToggleableMiotDevice, ClimateEntity):
         self._aux = False
         self.async_write_ha_state()
 
-    async def async_update(self):
-        await super().async_update()
+    def _handle_platform_specific_attrs(self):
+        super()._handle_platform_specific_attrs()
         try:
             self._target_temperature = self._state_attrs.get(self._did_prefix + 'target_temperature')
         except:
             pass
         try:
             self._current_temperature = self._state_attrs.get('environmen_temperature')
-        except:
-            pass
+            if not self._current_temperature:
+                if src := self._ctrl_params.get('current_temp_source'):
+                    try:
+                        state = self.hass.states.get(src)
+                        self._current_temperature = float(state.state)
+                    except Exception as ex:
+                        _LOGGER.error(f"{self._name} 's temperature source ({src}) is invalid! Expect a number, got {state.state if state else None}. {ex}")
+                        self._current_temperature = -1
+                else:
+                    self._current_temperature = self._target_temperature
+        except Exception as ex:
+            _LOGGER.error(ex)
         try:
             self._current_fan_mode = self.get_key_by_value(self._ctrl_params['speed'], self._state_attrs.get(self._did_prefix + 'speed'))
         except:
@@ -371,3 +424,7 @@ class MiotClimate(ToggleableMiotDevice, ClimateEntity):
                     self._hvac_mode = k
         except:
             pass
+        if self._swing_modes:
+            ver = self._state_attrs.get(self._did_prefix + 'vertical_swing') or 0
+            hor = self._state_attrs.get(self._did_prefix + 'horizontal_swing') or 0
+            self._current_swing_mode = SWING_MAPPING[hor << 1 | ver]

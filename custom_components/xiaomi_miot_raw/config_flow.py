@@ -11,6 +11,7 @@ from homeassistant.components import persistent_notification
 from homeassistant.const import *
 from homeassistant.helpers import aiohttp_client, discovery
 from homeassistant.helpers.device_registry import format_mac
+from homeassistant.core import callback
 from miio import Device as MiioDevice
 from miio import DeviceException
 from miio.miot_device import MiotDevice
@@ -30,11 +31,20 @@ from .deps.const import (
     DEFAULT_NAME,
     DUMMY_IP,
     DUMMY_TOKEN,
+    MAP,
 )
 from .deps.miot_device_adapter import MiotAdapter
 from .deps.special_devices import SPECIAL_DEVICES
 from .deps.xiaomi_cloud_new import MiCloud
 
+SERVERS = {
+    'cn': "China",
+    'de': "Europe",
+    'i2': "India",
+    'ru': "Russia",
+    'sg': "Singapore",
+    'us': "United States"
+}
 
 async def async_get_mp_from_net(hass, model):
     cs = aiohttp_client.async_get_clientsession(hass)
@@ -88,11 +98,10 @@ async def guess_mp_from_model(hass,model):
         if s:
             spec = await s.json()
             ad = MiotAdapter(spec)
-            mt = ad.mitype
 
-            dt = ad.get_all_devtype()
             mp = ad.get_all_mapping()
             prm = ad.get_all_params()
+            dt = ad.get_all_devtype() # 这一行必须在下面
             return {
                 'device_type': dt or ['switch'],
                 'mapping': json.dumps(mp,separators=(',', ':')),
@@ -137,7 +146,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._info = None
         self._model = None
         self._did = None
+        self._cloud_device = None
         self._input2 = {}
+        self._input2.update({"ett_id_migrated": True}) # 新的实体ID格式，相对稳定，为避免已有ID变化，灰度选项
         self._actions = {
             'xiaomi_account': "登录小米账号",
             'localinfo': "接入设备"
@@ -152,6 +163,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             else:
                 device = next(d for d in self.hass.data[DOMAIN]['micloud_devices']
                               if d['did'] == user_input['action'])
+                self._cloud_device = device
                 self._model = device.get('model')
                 self._did = device.get('did')
                 if get_conn_type(device) == 0:
@@ -167,7 +179,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_TOKEN: DUMMY_TOKEN,
                     })
 
-        if DOMAIN in self.hass.data and 'micloud_devices' in self.hass.data[DOMAIN]:
+        if DOMAIN in self.hass.data and self.hass.data[DOMAIN]['micloud_devices']:
             for device in self.hass.data[DOMAIN]['micloud_devices']:
                 if device['did'] not in self._actions:
                     dt = get_conn_type(device)
@@ -196,20 +208,18 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             self._name = user_input[CONF_NAME]
             self._host = user_input[CONF_HOST]
+            if user_input[CONF_TOKEN] == '0':
+                user_input[CONF_TOKEN] = '0'*32
             self._token = user_input[CONF_TOKEN]
             self._input2 = {**self._input2, **user_input}
-            # self._mapping = user_input[CONF_MAPPING]
-            # self._params = user_input[CONF_CONTROL_PARAMS]
 
             device = MiioDevice(self._host, self._token)
             try:
                 self._info = device.info()
             except DeviceException:
-                # print("DeviceException!!!!!!")
                 errors['base'] = 'cannot_connect'
             # except ValueError:
             #     errors['base'] = 'value_error'
-
 
             if self._info is not None:
                 unique_id = format_mac(self._info.mac_address)
@@ -299,7 +309,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         data=self._input2,
                     )
                 else:
-                    if cloud := self.hass.data[DOMAIN].get('cloud_instance'):
+                    for item in self.hass.data[DOMAIN]['cloud_instance_list']:
+                        if item['username']:
+                            cloud = item['cloud_instance']
+                    if cloud:
                         if not self._did:
                             for dev in self.hass.data[DOMAIN]['micloud_devices']:
                                 if dev.get('localip') == self._input2[CONF_HOST]:
@@ -311,6 +324,25 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 'serviceToken': cloud.auth['service_token'],
                                 'ssecurity': cloud.auth['ssecurity'],
                             }
+                            if s := cloud.svr:
+                                self._input2['update_from_cloud']['server_location'] = s
+                            if self._cloud_device:
+                                self._input2['cloud_device_info'] = {
+                                    'name': self._cloud_device.get('name'),
+                                    'mac': self._cloud_device.get('mac'),
+                                    'did': self._cloud_device.get('did'),
+                                    'model': self._cloud_device.get('model'),
+                                    'fw_version': self._cloud_device['extra'].get('fw_version'),
+                                }
+                            else:
+                                # 3rd party device and Manually added device doesn't have one
+                                self._input2['cloud_device_info'] = {
+                                    'name': self._input2[CONF_NAME],
+                                    'mac': "",
+                                    'did': self._did,
+                                    'model': self._input2[CONF_MODEL],
+                                    'fw_version': "",
+                                }
                             return self.async_create_entry(
                                 title=self._input2[CONF_NAME],
                                 data=self._input2,
@@ -364,6 +396,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._input2['update_from_cloud']['userId'] = user_input['userId']
             self._input2['update_from_cloud']['serviceToken'] = user_input['serviceToken']
             self._input2['update_from_cloud']['ssecurity'] = user_input['ssecurity']
+            cloud = None
+            for item in self.hass.data[DOMAIN]['cloud_instance_list']:
+                if item['username']:
+                    cloud = item['cloud_instance']
+            if cloud:
+                if s := cloud.svr:
+                    self._input2['update_from_cloud']['server_location'] = s
 
             return self.async_create_entry(
                 title=self._input2[CONF_NAME],
@@ -427,7 +466,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self.async_show_form(
                 step_id="devinfo",
                 data_schema=vol.Schema({
-                    # vol.Required('devtype', default=devtype_default): vol.In(SUPPORTED_DOMAINS),
                     vol.Required('devtype', default=devtype_default): cv.multi_select(SUPPORTED_DOMAINS),
                     vol.Required(CONF_MAPPING, default=mapping_default): str,
                     vol.Required(CONF_CONTROL_PARAMS, default=params_default): str,
@@ -445,3 +483,119 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             }),
             errors={'base': 'no_connect_warning'}
         )
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry):
+        """Get the options flow for this handler."""
+        return OptionsFlowHandler(config_entry)
+
+
+class OptionsFlowHandler(config_entries.OptionsFlow):
+    """Handle a option flow for tado."""
+
+    def __init__(self, config_entry: config_entries.ConfigEntry):
+        """Initialize options flow."""
+        self.config_entry = config_entry
+        self._input2 = config_entry.data.copy()
+        self._steps = []
+        self._prm = {}
+        if 'password' not in self._input2:
+            self._prm = json.loads(self._input2[CONF_CONTROL_PARAMS])
+
+    async def async_step_init(self, user_input=None):
+        """Handle options flow."""
+        if 'password' in self._input2:
+            self._steps.append(self.async_step_account())
+        else:
+            if 'indicator_light' in self._prm or 'physical_controls_locked' in self._prm:
+                self._steps.append(self.async_step_light_and_lock())
+            if self._input2['devtype'] == ['sensor']:
+                self._steps.append(self.async_step_sensor())
+            if 'climate' in self._input2['devtype']:
+                self._steps.append(self.async_step_climate())
+
+        if self._steps:
+            self._steps.append(self.async_finish())
+            return await self._steps[0]
+        else:
+            return self.async_abort(reason="no_configurable_options")
+
+    async def async_step_account(self, user_input=None):
+        if user_input is not None:
+            self._input2.update(user_input)
+            self._steps.pop(0)
+            return await self._steps[0]
+
+        return self.async_show_form(
+            step_id='account',
+            data_schema=vol.Schema({
+                vol.Required('server_location', default=self._input2.get('server_location') or 'cn'): vol.In(SERVERS),
+            })
+        )
+
+    async def async_step_light_and_lock(self, user_input=None):
+        if user_input is not None:
+            if 'show_indicator_light' in user_input:
+                self._prm['indicator_light']['enabled'] = user_input['show_indicator_light']
+            if 'show_physical_controls_locked' in user_input:
+                self._prm['physical_controls_locked']['enabled'] = user_input['show_physical_controls_locked']
+
+            self._steps.pop(0)
+            return await self._steps[0]
+        data_schema = vol.Schema({})
+        if a := self._prm.get('indicator_light'):
+            data_schema = data_schema.extend({vol.Optional('show_indicator_light', default=a.get('enabled', False)): bool})
+        if a := self._prm.get('physical_controls_locked'):
+            data_schema = data_schema.extend({vol.Optional('show_physical_controls_locked', default=a.get('enabled', False)): bool})
+
+        return self.async_show_form(
+            step_id='light_and_lock',
+            data_schema=data_schema,
+        )
+
+    async def async_step_sensor(self, user_input=None):
+        if user_input is not None:
+            for device,p in self._prm.items():
+                if device in MAP['sensor']:
+                    p.update(user_input)
+            self._steps.pop(0)
+            return await self._steps[0]
+
+        d = False
+        for device,p in self._prm.items():
+            if device in MAP['sensor'] and p.get('show_individual_sensor'):
+                d = True
+                break
+        return self.async_show_form(
+            step_id='sensor',
+            data_schema=vol.Schema({
+                vol.Optional('show_individual_sensor', default=d): bool,
+            }),
+        )
+
+    async def async_step_climate(self, user_input=None):
+        if user_input is not None:
+            for device,p in self._prm.items():
+                if device in MAP['climate']:
+                    p.update(user_input)
+            self._steps.pop(0)
+            return await self._steps[0]
+
+        return self.async_show_form(
+            step_id='climate',
+            data_schema=vol.Schema({
+                vol.Optional('current_temp_source', default=""): str,
+            }),
+        )
+
+    async def async_finish(self):
+        if self._prm:
+            self._input2[CONF_CONTROL_PARAMS] = json.dumps(self._prm,separators=(',', ':'))
+        self.hass.config_entries.async_update_entry(
+            self.config_entry, data=self._input2
+        )
+        await self.hass.config_entries.async_reload(
+            self.config_entry.entry_id
+        )
+        return self.async_create_entry(title="", data=None)

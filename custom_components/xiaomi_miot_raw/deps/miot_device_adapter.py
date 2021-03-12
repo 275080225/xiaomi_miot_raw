@@ -47,12 +47,14 @@ def name_by_type(typ):
 SUPPORTED = {vv for v in MAP.values() for vv in v}
 
 def get_type_by_mitype(mitype:str):
+    if mitype == "fan_control":
+        return "fan_control"
     for k,v in MAP.items():
         if mitype in v:
             return k
     return None
 
-translate = {"on":"switch_status", "fan_level":"speed", "horizontal_swing":"oscillate"}
+translate = {"on":"switch_status", "fan_level":"speed"}
 
 class MiotAdapter:
     def __init__(self, spec: dict):
@@ -89,7 +91,7 @@ class MiotAdapter:
 
     @property
     def devtype(self):
-        return get_type_by_mitype(name_by_type(self.spec.get('type')))
+        return get_type_by_mitype(self.mitype)
 
     def get_service_by_id(self, id:int):
         for s in self.spec['services']:
@@ -101,6 +103,8 @@ class MiotAdapter:
         if siid:
             service = self.get_service_by_id(siid)
         if not service :
+            return None
+        if 'properties' not in service:
             return None
         props = {}
         for p in service['properties']:
@@ -140,11 +144,21 @@ class MiotAdapter:
                     "siid": p.siid,
                     "piid": p.piid
                 }
-            if devtype == 'fan' and 'speed' not in ret and 'mode' in ret:
-                ret['speed'] = ret.pop('mode')
+            if devtype == 'fan':
+                if 'speed' not in ret and 'mode' in ret:
+                    ret['speed'] = ret.pop('mode')
+                if 'horizontal_swing' in ret:
+                    ret['oscillate'] = ret.pop('horizontal_swing')
+                elif 'vertical_swing' in ret:
+                    ret['oscillate'] = ret.pop('vertical_swing')
             if devtype == 'humidifier' and 'mode' not in ret and 'speed' in ret:
                 # deerma.humidifier.mjjsq
                 ret['mode'] = ret.pop('speed')
+            if devtype == 'cover':
+                if 'current_position' in ret and 'target_position' not in ret:
+                    ret['target_position'] = ret['current_position']
+                elif 'target_position' in ret and 'current_position' not in ret:
+                    ret['current_position'] = ret['target_position']
             return ret
         except Exception as ex:
             _LOGGER.error(ex)
@@ -237,12 +251,14 @@ class MiotAdapter:
                         for item in vl:
                             if 'pause' in item['description'].lower() or \
                                 'stop' in item['description'].lower() or \
-                                    '停' in item['description']:
+                                '停' in item['description']:
                                         dct['stop'] = item['value']
                             if 'up' in item['description'].lower() or \
+                                'open' in item['description'].lower() or \
                                 '升' in item['description']:
                                     dct['open'] = item['value']
                             if 'down' in item['description'].lower() or \
+                                'close' in item['description'].lower() or \
                                 '降' in item['description']:
                                     dct['close'] = item['value']
                         ret['motor_control'] = dct
@@ -259,6 +275,20 @@ class MiotAdapter:
                         ret['target_position'] = {
                             'value_range': vr
                         }
+                if p := propdict.get('status'):
+                    dct = {}
+                    if vl := p.vlist:
+                        for item in vl:
+                            if 'up' in item['description'].lower() or \
+                                'open' in item['description'].lower() or \
+                                '升' in item['description']:
+                                    dct['open'] = item['value']
+                            if 'down' in item['description'].lower() or \
+                                'close' in item['description'].lower() or \
+                                'dowm' in item['description'].lower() or \
+                                '降' in item['description']:
+                                    dct['close'] = item['value']
+                        ret['motor_status'] = dct
 
             if devtype == 'fan':
                 if p := propdict.get('mode'):
@@ -266,7 +296,7 @@ class MiotAdapter:
                         if not ret.get('speed'):
                             ret['speed'] = ret.pop('mode')
 
-            #TODO zhimi.fan.fa1 has both fan_level and mode
+                #TODO zhimi.fan.fa1 has both fan_level and mode
                 if p := propdict.get('horizontal_swing'):
                     ret['oscillate'] = {
                         True: True,
@@ -309,6 +339,15 @@ class MiotAdapter:
                         if k not in ret:
                             ret[k] = {}
                         ret[k]['unit'] = u
+                    if f := v.format_:
+                        if k not in ret:
+                            ret[k] = {}
+                        ret[k]['format'] = f
+
+            if p := propdict.get('physical_controls_locked'):
+                ret['enabled'] = False
+            if p := propdict.get('indicator_light'):
+                ret['enabled'] = False
 
             return ret
         except Exception as ex:

@@ -37,7 +37,7 @@ import random
 import string
 import time
 
-from aiohttp import ClientSession
+from aiohttp import ClientSession, ClientConnectorError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -47,6 +47,8 @@ UA = "Android-7.1.1-1.0.0-ONEPLUS A3010-136-%s APP/xiaomi.smarthome APPV/62830"
 
 class MiCloud:
     auth = None
+    svr = None
+    _fail_count = 0
 
     def __init__(self, session: ClientSession):
         self.session = session
@@ -161,8 +163,10 @@ class MiCloud:
 
         return None
 
-    async def request_miot_api(self, api, params = None):
-        api_base = "https://api.io.mi.com/app"
+    async def request_miot_api(self, api, params = None, server: str = None):
+        server = server or self.svr or 'cn'
+        api_base = 'https://api.io.mi.com/app' if server == 'cn' \
+            else f"https://{server}.api.io.mi.com/app"
         url2 = "/miotspec/"
         url = api_base+url2+api
 
@@ -189,6 +193,7 @@ class MiCloud:
                 'data': params
             }, timeout=5)
 
+            self._fail_count = 0
             resp = await r.json(content_type=None)
             if resp.get('message') == 'auth err':
                 _LOGGER.error("小米账号登录信息失效")
@@ -202,19 +207,23 @@ class MiCloud:
                 _LOGGER.info(f"Response of {api} from cloud: {resp}")
                 return resp
 
-        except asyncio.TimeoutError:
-            _LOGGER.error(f"Timeout while requesting MIoT api: {api}")
+        except (asyncio.TimeoutError, ClientConnectorError) as ex:
+            if self._fail_count < 3 and api == "prop/get":
+                self._fail_count += 1
+                _LOGGER.info(f"Error while requesting MIoT api {api} : {ex} ({self._fail_count})")
+            else:
+                _LOGGER.error(f"Error while requesting MIoT api {api} : {ex}")
         except:
-            _LOGGER.exception(f"Can't load devices list")
+            _LOGGER.exception(f"Can't request MIoT api")
 
-    async def get_props(self, params: str = ""):
-        return await self.request_miot_api('prop/get', params)
+    async def get_props(self, params: str = "", server: str = None):
+        return await self.request_miot_api('prop/get', params, server)
 
-    async def set_props(self, params: str = ""):
-        return await self.request_miot_api('prop/set', params)
+    async def set_props(self, params: str = "", server: str = None):
+        return await self.request_miot_api('prop/set', params, server)
 
-    async def call_action(self, params: str = ""):
-        return await self.request_miot_api('action', params)
+    async def call_action(self, params: str = "", server: str = None):
+        return await self.request_miot_api('action', params, server)
 
 
 def get_random_string(length: int):

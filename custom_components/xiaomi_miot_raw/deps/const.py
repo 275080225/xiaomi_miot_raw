@@ -26,10 +26,11 @@ SUPPORTED_DOMAINS = [
     "humidifier",
     "media_player",
     "climate",
+    "lock",
 ]
 DEFAULT_NAME = "Xiaomi MIoT Device"
 
-DUMMY_IP = "0.0.0.0"
+DUMMY_IP = "255.255.255.255"
 DUMMY_TOKEN = "00000000000000000000000000000000"
 
 SCHEMA = {
@@ -61,6 +62,9 @@ MAP = {
         "filter_3",
         "filter_4",
         "temperature_humidity_sensor",
+        "magnet_sensor",
+        "motion_sensor",
+        "submersion_sensor",
     },
     "switch": {
         "switch",
@@ -74,6 +78,7 @@ MAP = {
         "light_2",
         "light_3",
         "light_4",
+        "indicator_light",
     },
     "fan": {
         "a_l",
@@ -85,6 +90,9 @@ MAP = {
         "hood",
         "fan_control",
         "dryer",
+        "toilet",
+        "settings",
+        "settings_2",
     },
     "cover": {
         "curtain",
@@ -101,6 +109,9 @@ MAP = {
     },
     "climate": {
         "air_conditioner",
+    },
+    "lock": {
+        "physical_controls_locked",
     },
 }
 

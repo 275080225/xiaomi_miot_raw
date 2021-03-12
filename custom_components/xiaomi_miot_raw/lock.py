@@ -1,22 +1,22 @@
+""" This component doesn't support lock yet. This is for child lock! """
 import asyncio
-import json
 import logging
 from functools import partial
 
 from datetime import timedelta
-from collections import OrderedDict
 import json
 from collections import OrderedDict
 import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
-from homeassistant.components.switch import PLATFORM_SCHEMA, SwitchEntity
+from homeassistant.components.lock import LockEntity, PLATFORM_SCHEMA
 from homeassistant.const import *
 from homeassistant.exceptions import PlatformNotReady
+from homeassistant.util import color
 from miio.device import Device
 from miio.exceptions import DeviceException
 from miio.miot_device import MiotDevice
 
-from . import ToggleableMiotDevice, MiotSubToggleableDevice, dev_info
+from . import GenericMiotDevice, ToggleableMiotDevice, MiotSubDevice, dev_info
 from .deps.const import (
     DOMAIN,
     CONF_UPDATE_INSTANT,
@@ -35,20 +35,21 @@ from .deps.const import (
 )
 import copy
 
-TYPE = 'switch'
+TYPE = 'lock'
 
 _LOGGER = logging.getLogger(__name__)
-
+SCAN_INTERVAL = timedelta(seconds=10)
 DEFAULT_NAME = "Generic MIoT " + TYPE
 DATA_KEY = TYPE + '.' + DOMAIN
-SCAN_INTERVAL = timedelta(seconds=10)
+
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     SCHEMA
 )
+
 # pylint: disable=unused-argument
 @asyncio.coroutine
 async def async_setup_platform(hass, config, async_add_devices, discovery_info=None):
-    """Set up the sensor from config."""
+    """Set up the light from config."""
     if DATA_KEY not in hass.data:
         hass.data[DATA_KEY] = {}
 
@@ -73,49 +74,6 @@ async def async_setup_platform(hass, config, async_add_devices, discovery_info=N
     except:
         pass
 
-    if main_mi_type or type(params) == OrderedDict:
-        for k,v in mapping.items():
-            for kk,vv in v.items():
-                mappingnew[f"{k[:10]}_{kk}"] = vv
-
-        _LOGGER.info("Initializing %s with host %s (token %s...)", config.get(CONF_NAME), host, token[:5])
-        if type(params) == OrderedDict:
-            miio_device = MiotDevice(ip=host, token=token, mapping=mapping)
-        else:
-            miio_device = MiotDevice(ip=host, token=token, mapping=mappingnew)
-        try:
-            if host == DUMMY_IP and token == DUMMY_TOKEN:
-                raise DeviceException
-            device_info = miio_device.info()
-            model = device_info.model
-            _LOGGER.info(
-                "%s %s %s detected",
-                model,
-                device_info.firmware_version,
-                device_info.hardware_version,
-            )
-
-        except DeviceException as de:
-            if not config.get(CONF_CLOUD):
-                _LOGGER.warn(de)
-                raise PlatformNotReady
-            else:
-                if not (di := config.get('cloud_device_info')):
-                    _LOGGER.error(f"未能获取到设备信息，请删除 {config.get(CONF_NAME)} 重新配置。")
-                    raise PlatformNotReady
-                else:
-                    device_info = dev_info(
-                        di['model'],
-                        di['mac'],
-                        di['fw_version'],
-                        ""
-                    )
-        device = MiotSwitch(miio_device, config, device_info, hass, main_mi_type)
-
-        _LOGGER.info(f"{main_mi_type} is the main device of {host}.")
-        hass.data[DOMAIN]['miot_main_entity'][host] = device
-        hass.data[DOMAIN]['entities'][device.unique_id] = device
-        async_add_devices([device], update_before_add=True)
     if other_mi_type:
         retry_time = 1
         while True:
@@ -136,10 +94,12 @@ async def async_setup_platform(hass, config, async_add_devices, discovery_info=N
                     mappingnew[f"{k[:10]}_{kk}"] = vv
 
         devices = []
-        for item in other_mi_type:
-            devices.append(MiotSubSwitch(parent_device, mapping.get(item), params.get(item), item))
-        async_add_devices(devices, update_before_add=True)
 
+        for item in other_mi_type:
+            if item == "physical_controls_locked":
+                if params[item].get('enabled') == True:
+                    devices.append(MiotPhysicalControlLock(parent_device, mapping.get(item), params.get(item), item))
+        async_add_devices(devices, update_before_add=True)
 
 async def async_setup_entry(hass, config_entry, async_add_entities):
     config = copy.copy(hass.data[DOMAIN]['configs'].get(config_entry.entry_id, dict(config_entry.data)))
@@ -147,10 +107,30 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     # config[CONF_CONTROL_PARAMS] = config[CONF_CONTROL_PARAMS][TYPE]
     await async_setup_platform(hass, config, async_add_entities)
 
-class MiotSwitch(ToggleableMiotDevice, SwitchEntity):
-    def __init__(self, device, config, device_info, hass, main_mi_type):
-        ToggleableMiotDevice.__init__(self, device, config, device_info, hass, main_mi_type)
+class MiotPhysicalControlLock(MiotSubDevice, LockEntity):
+    def __init__(self, parent_device, mapping, params, mitype):
+        super().__init__(parent_device, mapping, params, mitype)
 
+    @property
+    def is_locked(self):
+        return self.device_state_attributes.get(f"{self._did_prefix}physical_controls_locked") == True
 
-class MiotSubSwitch(MiotSubToggleableDevice, SwitchEntity):
-    pass
+    async def async_lock(self, **kwargs):
+        result = await self._parent_device.set_property_new(self._did_prefix + "physical_controls_locked", True)
+        if result:
+            self._state = STATE_LOCKED
+            self._state_attrs[f"{self._did_prefix}physical_controls_locked"] = True
+            self._parent_device.schedule_update_ha_state(force_refresh=True)
+            self._skip_update = True
+
+    async def async_unlock(self, **kwargs):
+        result = await self._parent_device.set_property_new(self._did_prefix + "physical_controls_locked", False)
+        if result:
+            self._state = STATE_UNLOCKED
+            self._state_attrs[f"{self._did_prefix}physical_controls_locked"] = False
+            self._parent_device.schedule_update_ha_state(force_refresh=True)
+            self._skip_update = True
+
+    @property
+    def supported_features(self):
+        return 0
