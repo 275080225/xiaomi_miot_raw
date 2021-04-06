@@ -31,6 +31,7 @@ import base64
 import hashlib
 import hmac
 import json
+import locale
 import logging
 import os
 import random
@@ -137,12 +138,15 @@ class MiCloud:
         nonce = gen_nonce()
         signed_nonce = gen_signed_nonce(self.auth['ssecurity'], nonce)
         signature = gen_signature(url, signed_nonce, nonce, data)
-
+        try:
+            loc = locale.getdefaultlocale()[0] or "en_US"
+        except Exception:
+            loc = "en_US"
         try:
             r = await self.session.post(baseurl + url, cookies={
                 'userId': self.auth['user_id'],
                 'serviceToken': self.auth['service_token'],
-                'locale': 'en_US'
+                'locale': loc
             }, headers={
                 'User-Agent': UA,
                 'x-xiaomi-protocal-flag-cli': 'PROTOCAL-HTTP2'
@@ -167,12 +171,11 @@ class MiCloud:
         server = server or self.svr or 'cn'
         api_base = 'https://api.io.mi.com/app' if server == 'cn' \
             else f"https://{server}.api.io.mi.com/app"
-        url2 = "/miotspec/"
-        url = api_base+url2+api
+        url = api_base+api
 
         nonce = gen_nonce()
         signed_nonce = gen_signed_nonce(self.auth['ssecurity'], nonce)
-        signature = gen_signature(url2+api, signed_nonce, nonce, params)
+        signature = gen_signature(api, signed_nonce, nonce, params)
         headers = {
             'content-type': "application/x-www-form-urlencoded",
             'x-xiaomi-protocal-flag-cli': "PROTOCAL-HTTP2",
@@ -208,7 +211,7 @@ class MiCloud:
                 return resp
 
         except (asyncio.TimeoutError, ClientConnectorError) as ex:
-            if self._fail_count < 3 and api == "prop/get":
+            if self._fail_count < 3 and api == "/miotspec/prop/get":
                 self._fail_count += 1
                 _LOGGER.info(f"Error while requesting MIoT api {api} : {ex} ({self._fail_count})")
             else:
@@ -217,13 +220,26 @@ class MiCloud:
             _LOGGER.exception(f"Can't request MIoT api")
 
     async def get_props(self, params: str = "", server: str = None):
-        return await self.request_miot_api('prop/get', params, server)
+        return await self.request_miot_api('/miotspec/prop/get', params, server)
 
     async def set_props(self, params: str = "", server: str = None):
-        return await self.request_miot_api('prop/set', params, server)
+        return await self.request_miot_api('/miotspec/prop/set', params, server)
 
     async def call_action(self, params: str = "", server: str = None):
-        return await self.request_miot_api('action', params, server)
+        return await self.request_miot_api('/miotspec/action', params, server)
+
+    async def get_user_device_data(self, did: str, key, type_, server: str = None, *, limit=5):
+        data = {
+            "uid": self.auth['user_id'],
+            "did": did,
+            "time_end": 9999999999,
+            "time_start": 0,
+            "limit": limit,
+            "key": key,
+            "type": type_,
+        }
+        params = json.dumps(data, separators=(',', ':'))
+        return await self.request_miot_api('/user/get_user_device_data', params, server)
 
 
 def get_random_string(length: int):

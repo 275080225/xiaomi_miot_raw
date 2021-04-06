@@ -2,6 +2,18 @@
 
 简体中文 | [English](https://github.com/ha0y/xiaomi_miot_raw/blob/add-miot-support/README_en.md)
 
+---
+### 2021.3.30 现已支持智能门锁！
+
+![HACS中不支持显示图片，请在浏览器中打开查看](images/smartlock.jpg)
+
+<a href="https://github.com/ha0y/xiaomi_miot_raw/blob/master/images/donation.png">
+    <img src="https://img.shields.io/badge/%E8%AF%B7%E4%BD%9C%E8%80%85-%E5%96%9D%E6%9D%AF%E5%92%96%E5%95%A1%EF%BC%9F-blue.svg"
+        alt="请作者喝杯咖啡？">
+</a>
+
+---
+
 MIoT 协议是小米智能家居从 2018 年起推行的智能设备通信协议规范，此后凡是可接入米家的设备均通过此协议进行通信。此插件按照 MIoT 协议规范与设备通信，实现对设备的状态读取及控制。
 
 由于 MIoT 协议具有极强的通用性，已接入米家的智能设备均可通过此插件快速高效地接入 Home Assistant，而无关设备的具体型号。
@@ -9,20 +21,23 @@ MIoT 协议是小米智能家居从 2018 年起推行的智能设备通信协议
 本插件运行方式默认为本地接入(局域网读取/控制)，延迟极低。**对于不支持本地读取的设备，支持 2 种云端接入（云端读取本地控制/云端读取云端控制）。**
 
 目前此插件已支持以下设备类型：
-* sensor (传感器)
-* switch (开关)
-* cover (卷帘/晾衣架/升降帘/窗帘)
-* light (灯，可以开关、调亮度、调色、设置灯效)
-* fan (风扇，可以开关、设置风速、设置摇头)
-* humidifier (加湿器/除湿器，可以开关、设置湿度、选择模式)
+* sensor (传感器类设备，涵盖设备所有可读取的信息)
+* switch (开关/插座及其他所有可以开关的设备)
+* light (灯，包括吸顶灯/风扇灯/台灯/设备的指示灯，~~等灯等灯~~)
+* cover (电机类设备，卷帘/晾衣架/升降帘/窗帘)
+* fan (风扇)
+* humidifier (加湿器/除湿器)
 * media player (小爱音箱，可以播放/暂停/调音量，上一曲/下一曲，TTS/执行自定义指令)
-* climate (空调/空调伴侣/浴霸，可以设定温度、风速、模式)
+* climate (空气调节类设备，空调/空调伴侣/电暖气)
+* water heater (热水器/电水壶/洗碗机)
+* 部分智能门锁
+* 其他不能按照 HA 的设备类型分类的设备 (洗衣机、咖啡机、鱼缸等等)
 
 如果对您有帮助，欢迎给个 Star！ 🌟
 
 如果插件工作不正常，请先参考[调试](https://github.com/ha0y/xiaomi_miot_raw#调试)部分，打开调试日志，通过日志排查问题。
 
-如果您认为插件有 bug，或者有新功能的想法，您可以提交 Issue。
+如果您认为插件有 bug，或者有新功能的想法，或者您的设备没有支持，您可以提交 Issue。
 使用上的问题，请在论坛咨询，或加入 QQ 群: **982 100 289**
 
 ## 安装
@@ -36,41 +51,105 @@ MIoT 协议是小米智能家居从 2018 年起推行的智能设备通信协议
 ## 配置
 
 ### UI 配置法
+<details>
+<summary>登录账号</summary>
+
 ![HACS中不支持显示图片，请在浏览器中打开查看](images/flow/1.png)
 
-![2](images/flow/2.png)
+<img src="https://github.com/ha0y/xiaomi_miot_raw/raw/master/images/flow/2.png" width="500"/>
 
-![3](images/flow/3.png)
+<img src="https://github.com/ha0y/xiaomi_miot_raw/raw/master/images/flow/3.png" width="500"/>
+
+<img src="https://github.com/ha0y/xiaomi_miot_raw/raw/master/images/flow/4.png" width="500"/>
+</details>
+
+<details>
+<summary>逐一自动添加设备（推荐）</summary>
+
+![1](images/flow/1.png)
+
+<img src="https://github.com/ha0y/xiaomi_miot_raw/raw/master/images/flow/8.png" width="500"/>
+</details>
+
+<details>
+<summary>批量添加设备（建议用来添加非 WiFi 设备）</summary>
+
+<img src="https://github.com/ha0y/xiaomi_miot_raw/raw/master/images/flow/5.png" width="500"/>
+
+<img src="https://github.com/ha0y/xiaomi_miot_raw/raw/master/images/flow/6.png" width="500"/>
+
+<img src="https://github.com/ha0y/xiaomi_miot_raw/raw/master/images/flow/7.png" width="500"/>
+</details>
+
 
 ### 文件配置法
 
 **请参考 [config_example 文件夹](https://github.com/ha0y/xiaomi_miot_raw/tree/add-miot-support/config_example)** 内的相关文件
 
-各个设备类型公用的配置参数：
-- **host** (*Required*): 设备 IP。
-- **token** (*Required*): 设备 token。
-- **name** (*Optional*): 设备名称。
-- **mapping** (*Required*): 设备的功能与 id 的映射。
-- **params** (*Optional*): 与 mapping 对应，指定关于属性值的一些信息。
-- **scan_interval** (*Optional*): 状态刷新周期。
+## 常见问题
+**安装以后，搜索不到集成？**
 
-- **sensor_property** (*Required*，仅限 sensor): 把 mapping 中的哪一个作为传感器的状态。其他的将作为传感器的属性。
-- **sensor_unit** (*Optional*，仅限 senso): 传感器单位。
+确保安装后已重启 Home Assistant。由于浏览器缓存原因，可能仍然不能搜索到集成，请尝试清空浏览器缓存。如果仍然无效，尝试通过其他浏览器进行配置。
 
-- **update_from_cloud** 从米家服务器读取设备状态。
+**提示设备不受支持，怎么办？**
 
-**mapping** 和 **params** 中的项目具有对应关系。params 是为了指定关于属性值的一些信息。比如说对于 switch_status，它代表开关状态，这一点是确定的；可是有的设备，值为 1 为开，值为 2 为关；有的设备值为 True 为开，值为 False 为关。这就需要在 params 中指定具体的状态值了。又如，蓝牙网关插座，显示的功率数值没有小数点，实际功率要除以 100；而某品牌插座，同样没有小数点，可实际功率要除以 10……这种问题同样可以在 params 中解决。二者的一些选项：
+不要灰心。绝大多数已接入米家的设备都是可以支持的，只是作者还没有适配。请提交 Issue，附上设备的 model。同时请加入 QQ 群，如果作者遇到问题需要进一步提供信息，会通过 QQ 联系你。
 
-- **switch_status** (*Required* 适用于 light switch fan): 插件通过读写这个属性来获取和控制开关状态。其下的 **power_on** 和 **power_off** 指定开和关的状态值。
-- **motor_control** (*Required* 适用于 cover)，插件通过读写这个属性来控制电机状态。其下的 **open**、**close** 和 **stop** 指定升/降/停的状态值。
-- **motor_status** (*Optional* 适用于 cover)，插件通过读写这个属性来获取电机状态。其下的 **open**、**close** 和 **stop** 指定升/降/停的状态值。注意这些值可能与上面的控制值不同。
-- **brightness** (*Optional* 适用于 light)：设置此项后支持亮度调节。
-- **color_temperature** (*Optional* 适用于 light)：设置此项后支持色温调节。
-- **oscillate** (*Optional* 适用于 fan)：设置此项后支持摇头。
-- **speed** (*Optional* 适用于 fan)：设置此项后支持风速调节。
-- **mode** (*Optional* 适用于 light fan)：灯、加湿器等设备的运行模式。
+**为什么不支持摄像机？**
+
+本插件是一个“通用插件”，因此极少包含与特定设备有关的代码。而小米仅仅未对摄像机的标准进行统一，设备厂商各行其是。经过逆向小爱音箱上的“米家”APP 发现，即使是这样一个功能残缺的客户端，为了实现摄像机的播放，也集成了所有摄像机设备厂商的 SDK。因此可以认为，摄像机各家厂商的标准、协议、通信都不统一，无法做到通用适配。因此摄像机无法支持。
+
+**本插件能否实现“断网联动”？**
+
+如果设备未通过云端接入（读取、控制均不走云端），通过本插件接入的设备在断网条件下可以正常被读取和控制。如果使用了云端接入，则不可以。（注：断网指的是断开互联网，局域网正常。局域网若中断则所有设备均不能工作。）
 
 ## 更新日志
+### 4 月 6 日
+1. 支持风扇无级调速（需设备支持并将 HA 更新到 2021.3.0 以上版本）
+2. 修复本地接入设备动作列表执行失败的问题。
+
+### 4 月 5 日
+1. 支持鱼缸。
+2. 修复 cover 状态反馈不正确的问题。
+
+### 4 月 2 日
+1. 修复本地设备状态经常出现“不可用”的问题。
+2. 优化新设备的默认名称。
+3. 支持批量添加设备（实验中）
+
+### 3 月 30 日
+1. **支持门锁！**
+
+### 3 月 26 日
+1. 优化代码结构。
+2. 优化状态属性显示。
+3. 优化添加设备体验。
+4. 修复部分热水器不可用问题。
+
+### 3 月 23 日
+1. 修复部分设备支持本地读取但读取失败的问题。
+2. 部分设备的状态属性可以显示名称而不是编号。
+
+### 3 月 22 日
+1. 支持部分新设备类型。
+2. 修复依赖版本导致的问题。
+
+### 3 月 19 日
+1. 修复部分除湿机问题 #75
+
+### 3 月 17 日
+1. 支持新风机辅热。
+2. 修复部分加湿器的湿度调节。
+3. 支持电水壶。
+4. 修复非 WiFi 设备问题 #61
+
+### 3 月 16 日
+1. 优化设备离线的处理方式。
+
+### 3 月 14 日
+1. 支持水质传感器。
+2. 支持 water heater 设备类型，可以接入热水器了。
+
 ### 3 月 8 日
 1. 支持设备童锁、指示灯开关。（在选项中启用）
 

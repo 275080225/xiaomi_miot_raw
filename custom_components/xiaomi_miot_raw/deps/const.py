@@ -27,6 +27,7 @@ SUPPORTED_DOMAINS = [
     "media_player",
     "climate",
     "lock",
+    "water_heater",
 ]
 DEFAULT_NAME = "Xiaomi MIoT Device"
 
@@ -65,6 +66,10 @@ MAP = {
         "magnet_sensor",
         "motion_sensor",
         "submersion_sensor",
+        "illumination_sensor",
+        "tds_sensor",
+        "air_fryer",
+        "remain_clean_time",
     },
     "switch": {
         "switch",
@@ -72,12 +77,17 @@ MAP = {
         "switch_2",
         "switch_3",
         "switch_4",
+        "coffee_machine",
+        "fish_tank",
     },
     "light": {
         "light",
         "light_2",
         "light_3",
         "light_4",
+        "ambient_light",
+        "ambient_light_custom",
+        "plant_light",
         "indicator_light",
     },
     "fan": {
@@ -93,6 +103,9 @@ MAP = {
         "toilet",
         "settings",
         "settings_2",
+        "air_fresh_heater",
+        "bed",
+        "pet_drinking_fountain",
     },
     "cover": {
         "curtain",
@@ -109,9 +122,15 @@ MAP = {
     },
     "climate": {
         "air_conditioner",
+        "heater",
     },
     "lock": {
         "physical_controls_locked",
+    },
+    "water_heater": {
+        "water_heater",
+        "kettle",
+        "dishwasher",
     },
 }
 

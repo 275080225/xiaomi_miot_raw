@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 import logging
 from datetime import timedelta
 from functools import partial
@@ -18,9 +19,8 @@ from homeassistant.helpers.entity import Entity, ToggleEntity
 from homeassistant.helpers.entity_component import EntityComponent
 from homeassistant.helpers.storage import Store
 from homeassistant.util import color
-from miio.device import Device
 from miio.exceptions import DeviceException
-from miio.miot_device import MiotDevice
+from .deps.miio_new import MiotDevice
 import copy
 import math
 from collections import OrderedDict
@@ -36,7 +36,10 @@ from .deps.const import (
     ATTR_MODEL,
     ATTR_FIRMWARE_VERSION,
     ATTR_HARDWARE_VERSION,
-    SUPPORTED_DOMAINS,
+    SCHEMA,
+    MAP,
+    DUMMY_IP,
+    DUMMY_TOKEN,
 )
 
 from .deps.xiaomi_cloud_new import *
@@ -64,7 +67,9 @@ CONFIG_SCHEMA = vol.Schema(
 
 SHORT_DELAY = 3
 LONG_DELAY = 5
+NOTIFY_INTERVAL = 60 * 10
 
+OFFLINE_NOTIFY = False
 UPDATE_BETA_FLAG = False
 
 async def async_setup(hass, hassconfig):
@@ -78,6 +83,7 @@ async def async_setup(hass, hassconfig):
     hass.data[DOMAIN].setdefault('miot_main_entity', {})
     hass.data[DOMAIN].setdefault('micloud_devices', [])
     hass.data[DOMAIN].setdefault('cloud_instance_list', [])
+    hass.data[DOMAIN].setdefault('event_fetcher_list', [])
 
     component = EntityComponent(_LOGGER, DOMAIN, hass, SCAN_INTERVAL)
     hass.data[DOMAIN]['component'] = component
@@ -325,7 +331,7 @@ class GenericMiotDevice(Entity):
             ATTR_FIRMWARE_VERSION: device_info.firmware_version,
             ATTR_HARDWARE_VERSION: device_info.hardware_version,
         }
-        self._notified = False
+        self._last_notified = 0
         self._callbacks = set()
 
     @property
@@ -378,8 +384,11 @@ class GenericMiotDevice(Entity):
             result = await self.hass.async_add_job(partial(func, *args, **kwargs))
 
             _LOGGER.info("Response received from %s: %s", self._name, result)
-            if result[0]['code'] == 0:
-                return True
+            # This is a workaround. The action should not only return whether operation succeed, but also the 'out'.
+            if 'aiid' in result:
+                return True if result['code'] == 0 else False
+            return True if result[0]['code'] == 0 else False
+
         except DeviceException as exc:
             _LOGGER.error(mask_error, exc)
             return False
@@ -423,6 +432,18 @@ class GenericMiotDevice(Entity):
                             for item in r:
                                 if item['code'] == 1:
                                     self._delay_update = LONG_DELAY
+                                elif item['code'] == -704042011:
+                                    if self._available == True or self._available == None:
+                                        if OFFLINE_NOTIFY:
+                                            persistent_notification.async_create(
+                                                self._hass,
+                                                f"请注意，云端接入设备 **{self._name}** 已离线。",
+                                                "Xiaomi MIoT - 设备离线")
+                                        else:
+                                            _LOGGER.warn(f"请注意，云端接入设备 **{self._name}** 已离线。")
+                                    self._available = False
+                                    self._skip_update = True
+                                    return False
                                 elif item['code'] != 0:
                                     _LOGGER.error(f"Control {self._name} by cloud failed: {r}")
                                     return False
@@ -443,6 +464,18 @@ class GenericMiotDevice(Entity):
                             for item in r:
                                 if item['code'] == 1:
                                     self._delay_update = LONG_DELAY
+                                elif item['code'] == -704042011:
+                                    if self._available == True or self._available == None:
+                                        if OFFLINE_NOTIFY:
+                                            persistent_notification.async_create(
+                                                self._hass,
+                                                f"请注意，云端接入设备 **{self._name}** 已离线。",
+                                                "Xiaomi MIoT - 设备离线")
+                                        else:
+                                            _LOGGER.warn(f"请注意，云端接入设备 **{self._name}** 已离线。")
+                                    self._available = False
+                                    self._skip_update = True
+                                    return False
                                 elif item['code'] != 0:
                                     _LOGGER.error(f"Control {self._name} by cloud failed: {r}")
                                     return False
@@ -455,8 +488,14 @@ class GenericMiotDevice(Entity):
             return False
 
     async def call_action_new(self, siid, aiid, params2=None, did=None):
+        if did is not None:
+            did_ = did
+        elif self._cloud is not None:
+            did_ = self._cloud.get("did")
+        else:
+            did_ = f'action-{siid}-{aiid}'
         params = {
-            'did':  did or self._cloud.get("did") or f'action-{siid}-{aiid}',
+            'did':  did_,
             'siid': siid,
             'aiid': aiid,
             'in':   params2 or [],
@@ -509,6 +548,13 @@ class GenericMiotDevice(Entity):
                             f = self._ctrl_params_new[r['did']]['value_ratio']
                             statedict[r['did']] = round(r['value'] * f , 3)
                         except (KeyError, TypeError, IndexError):
+                            if (('status' in r['did'] and 'switch_status' not in r['did']) \
+                                or 'fault' in r['did']) \
+                                and type(r['value']) == int:
+                                if r['did'] in self._ctrl_params_new:
+                                    if s := self.get_key_by_value(self._ctrl_params_new[r['did']], r['value']):
+                                        statedict[r['did']] = s
+                                        continue
                             statedict[r['did']] = r['value']
                     elif r['code'] == 9999:
                         persistent_notification.async_create(
@@ -528,7 +574,7 @@ class GenericMiotDevice(Entity):
                     self._assumed_state = True
                     self._skip_update = True
                     # _LOGGER.warn("设备不支持状态反馈")
-                    if not self._notified:
+                    if time.time() - self._last_notified > NOTIFY_INTERVAL:
                         persistent_notification.async_create(
                             self._hass,
                             f"您添加的设备: **{self._name}** ，\n"
@@ -536,7 +582,7 @@ class GenericMiotDevice(Entity):
                             f"全部返回 **-4004** 错误。\n"
                             "请考虑通过云端接入此设备来解决此问题。",
                             "设备可能不受支持")
-                        self._notified = True
+                        self._last_notified = time.time()
 
             else:
                 _LOGGER.info(f"{self._name} is updating from cloud.")
@@ -553,16 +599,32 @@ class GenericMiotDevice(Entity):
                 dict1 = {}
                 statedict = {}
                 if a:
-                    self._available = True
+                    if all(item['code'] == -704042011 for item in a['result']):
+                        if self._available == True or self._available == None:
+                            if OFFLINE_NOTIFY:
+                                persistent_notification.async_create(
+                                    self._hass,
+                                    f"请注意，云端接入设备 **{self._name}** 已离线。",
+                                    "Xiaomi MIoT - 设备离线")
+                            else:
+                                _LOGGER.warn(f"请注意，云端接入设备 **{self._name}** 已离线。")
+                        self._available = False
+                    else:
+                        self._available = True
+
                     for item in a['result']:
-                        if dict1.get(item['siid']):
-                            dict1[item['siid']][item['piid']] = item.get('value')
-                        else:
-                            dict1[item['siid']] = {}
-                            dict1[item['siid']][item['piid']] = item.get('value')
+                        dict1.setdefault(item['siid'], {})
+                        dict1[item['siid']][item['piid']] = item.get('value')
 
                     for key, value in self._mapping.items():
                         try:
+                            if (('status' in key and 'switch_status' not in key) \
+                                or 'fault' in key) \
+                                and type(dict1[value['siid']][value['piid']]) == int:
+                                if key in self._ctrl_params_new:
+                                    if s := self.get_key_by_value(self._ctrl_params_new[key], dict1[value['siid']][value['piid']]):
+                                        statedict[key] = s
+                                        continue
                             statedict[key] = dict1[value['siid']][value['piid']]
                         except KeyError:
                             statedict[key] = None
@@ -578,7 +640,6 @@ class GenericMiotDevice(Entity):
         except DeviceException as ex:
             if self._fail_count < 3:
                 self._fail_count += 1
-                self._available = False
                 _LOGGER.info("Got exception while fetching %s 's state: %s. Count %d", self._name, ex, self._fail_count)
             else:
                 self._available = False
@@ -666,7 +727,18 @@ class GenericMiotDevice(Entity):
         dict1 = {}
         statedict = {}
         if self._cloud['did'] in self.coordinator.data:
-            self._available = True
+            if all(item['code'] == -704042011 for item in self.coordinator.data[self._cloud['did']]):
+                if self._available == True or self._available == None:
+                    if OFFLINE_NOTIFY:
+                        persistent_notification.async_create(
+                            self._hass,
+                            f"请注意，云端接入设备 **{self._name}** 已离线。",
+                            "Xiaomi MIoT - 设备离线")
+                    else:
+                        _LOGGER.warn(f"请注意，云端接入设备 **{self._name}** 已离线。")
+                self._available = False
+            else:
+                self._available = True
             for item in self.coordinator.data[self._cloud['did']]:
                 if dict1.get(item['siid']):
                     dict1[item['siid']][item['piid']] = item.get('value')
@@ -749,8 +821,6 @@ class ToggleableMiotDevice(GenericMiotDevice, ToggleEntity):
 
 
 class MiotSubDevice(Entity):
-    """This part is modified from @al-one 's."""
-    # should_poll = False
     def __init__(self, parent_device, mapping, params, mitype):
         self._unique_id = f'{parent_device.unique_id}-{mitype}'
         self._entity_id = f"{parent_device._entity_id}-{mitype}"
@@ -862,3 +932,121 @@ class dev_info:
     mac_address       : str     # Not available for cloud
     firmware_version  : str
     hardware_version  : str     # Not available for cloud
+
+
+async def async_generic_setup_platform(
+    hass,
+    config,
+    async_add_devices,
+    discovery_info,
+    TYPE,           # 每个设备类型调用此函数时指定自己的类型，因此函数执行中只处理这个类型的设备
+    main_class_dict : dict,
+    sub_class_dict : dict = {},
+    *,
+    special_dict={}
+):
+    DATA_KEY = TYPE + '.' + DOMAIN
+    hass.data.setdefault(DATA_KEY, {})
+
+    host = config.get(CONF_HOST)
+    token = config.get(CONF_TOKEN)
+    mapping = config.get(CONF_MAPPING)
+    params = config.get(CONF_CONTROL_PARAMS)
+
+    mappingnew = {}
+
+    main_mi_type = None
+    other_mi_type = []
+
+    for t in MAP[TYPE]:
+        if mapping.get(t):
+            other_mi_type.append(t)
+        if 'main' in (params.get(t) or ""):
+            main_mi_type = t
+
+    try:
+        other_mi_type.remove(main_mi_type)
+    except:
+        pass
+
+    if main_mi_type or type(params) == OrderedDict:
+        for k,v in mapping.items():
+            for kk,vv in v.items():
+                mappingnew[f"{k[:10]}_{kk}"] = vv
+
+        _LOGGER.info("Initializing %s with host %s (token %s...)", config.get(CONF_NAME), host, token[:5])
+        if type(params) == OrderedDict:
+            miio_device = MiotDevice(ip=host, token=token, mapping=mapping)
+        else:
+            miio_device = MiotDevice(ip=host, token=token, mapping=mappingnew)
+        try:
+            if host == DUMMY_IP and token == DUMMY_TOKEN:
+                raise DeviceException
+            device_info = miio_device.info()
+            model = device_info.model
+            _LOGGER.info(
+                "%s %s %s detected",
+                model,
+                device_info.firmware_version,
+                device_info.hardware_version,
+            )
+        except DeviceException as de:
+            if not config.get(CONF_CLOUD):
+                _LOGGER.warn(de)
+                raise PlatformNotReady
+            else:
+                if not (di := config.get('cloud_device_info')):
+                    _LOGGER.error(f"未能获取到设备信息，请删除 {config.get(CONF_NAME)} 重新配置。")
+                    raise PlatformNotReady
+                else:
+                    device_info = dev_info(
+                        di['model'],
+                        di['mac'],
+                        di['fw_version'],
+                        ""
+                    )
+        if main_mi_type in main_class_dict:
+            device = main_class_dict[main_mi_type](miio_device, config, device_info, hass, main_mi_type)
+        else:
+            device = main_class_dict['default'](miio_device, config, device_info, hass, main_mi_type)
+
+        _LOGGER.info(f"{main_mi_type} is the main device of {host}.")
+        hass.data[DOMAIN]['miot_main_entity'][f'{host}-{config.get(CONF_NAME)}'] = device
+        hass.data[DOMAIN]['entities'][device.unique_id] = device
+        async_add_devices([device], update_before_add=True)
+
+    elif not sub_class_dict:
+        _LOGGER.error(f"{TYPE}只能作为主设备！请检查{config.get(CONF_NAME)}配置")
+
+    if sub_class_dict:
+        retry_time = 1
+        while True:
+            if parent_device := hass.data[DOMAIN]['miot_main_entity'].get(f'{host}-{config.get(CONF_NAME)}'):
+                break
+            else:
+                retry_time *= 2
+                if retry_time > 30:
+                    _LOGGER.error(f"The main device of {config.get(CONF_NAME)}({host}) is still not ready after 30 seconds!")
+                    raise PlatformNotReady
+                else:
+                    _LOGGER.debug(f"The main device of {config.get(CONF_NAME)}({host}) is still not ready after {retry_time - 1} seconds.")
+                    await asyncio.sleep(retry_time)
+
+        for k,v in mapping.items():
+            if k in MAP[TYPE]:
+                for kk,vv in v.items():
+                    mappingnew[f"{k[:10]}_{kk}"] = vv
+
+        devices = []
+
+        for item in other_mi_type:
+            if item == "indicator_light":
+                if not params[item].get('enabled'):
+                    continue
+
+            if item in sub_class_dict:
+                devices.append(sub_class_dict[item](parent_device, mapping.get(item), params.get(item), item))
+            else:
+                devices.append(sub_class_dict['default'](parent_device, mapping.get(item), params.get(item), item))
+
+        async_add_devices(devices, update_before_add=True)

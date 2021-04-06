@@ -11,9 +11,8 @@ from homeassistant.components.media_player import *
 from homeassistant.components.media_player.const import *
 from homeassistant.const import *
 from homeassistant.exceptions import PlatformNotReady
-from miio.device import Device
 from miio.exceptions import DeviceException
-from miio.miot_device import MiotDevice
+from .deps.miio_new import MiotDevice
 from homeassistant.components import persistent_notification
 
 from . import GenericMiotDevice, ToggleableMiotDevice
@@ -115,7 +114,7 @@ async def async_setup_platform(hass, config, async_add_devices, discovery_info=N
             raise PlatformNotReady
 
         _LOGGER.info(f"{main_mi_type} is the main device of {host}.")
-        hass.data[DOMAIN]['miot_main_entity'][host] = device
+        hass.data[DOMAIN]['miot_main_entity'][f'{host}-{config.get(CONF_NAME)}'] = device
         hass.data[DOMAIN]['entities'][device.unique_id] = device
         async_add_devices([device], update_before_add=True)
 
@@ -157,8 +156,6 @@ async def async_setup_platform(hass, config, async_add_devices, discovery_info=N
 
 async def async_setup_entry(hass, config_entry, async_add_entities):
     config = copy.copy(hass.data[DOMAIN]['configs'].get(config_entry.entry_id, dict(config_entry.data)))
-    # config[CONF_MAPPING] = config[CONF_MAPPING][TYPE]
-    # config[CONF_CONTROL_PARAMS] = config[CONF_CONTROL_PARAMS][TYPE]
     await async_setup_platform(hass, config, async_add_entities)
 
 

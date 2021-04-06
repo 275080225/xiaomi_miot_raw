@@ -14,7 +14,7 @@ from homeassistant.helpers.device_registry import format_mac
 from homeassistant.core import callback
 from miio import Device as MiioDevice
 from miio import DeviceException
-from miio.miot_device import MiotDevice
+from .deps.miio_new import MiotDevice
 
 from .deps.const import (
     DOMAIN,
@@ -34,7 +34,7 @@ from .deps.const import (
     MAP,
 )
 from .deps.miot_device_adapter import MiotAdapter
-from .deps.special_devices import SPECIAL_DEVICES
+from .deps.special_devices import SPECIAL_DEVICES, LOCK_PRM
 from .deps.xiaomi_cloud_new import MiCloud
 
 SERVERS = {
@@ -45,6 +45,70 @@ SERVERS = {
     'sg': "Singapore",
     'us': "United States"
 }
+
+class URN:
+    def __init__(self, urn : str):
+        if ':' not in urn:
+            raise TypeError("Not a valid urn.")
+        self.urnstr = urn
+        self.urn = urn.split(':')
+
+    def __repr__ (self):
+        return self.urnstr
+
+    def _cmp (self, other):
+        if isinstance(other, str):
+            other = URN(other)
+        elif not isinstance(other, URN):
+            return NotImplemented
+        if len(self.urn) != len(other.urn):
+            return NotImplemented
+        for i in range(len(self.urn)):
+            try:
+                s = int(self.urn[i])
+                o = int(other.urn[i])
+            except Exception:
+                s = self.urn[i]
+                o = other.urn[i]
+
+            if s == o:
+                continue
+            elif s < o:
+                return -1
+            elif s > o:
+                return 1
+        return 0
+
+    def __eq__(self, other):
+        c = self._cmp(other)
+        if c is NotImplemented:
+            return c
+        return c == 0
+
+    def __lt__(self, other):
+        c = self._cmp(other)
+        if c is NotImplemented:
+            return c
+        return c < 0
+
+    def __le__(self, other):
+        c = self._cmp(other)
+        if c is NotImplemented:
+            return c
+        return c <= 0
+
+    def __gt__(self, other):
+        c = self._cmp(other)
+        if c is NotImplemented:
+            return c
+        return c > 0
+
+    def __ge__(self, other):
+        c = self._cmp(other)
+        if c is NotImplemented:
+            return c
+        return c >= 0
+
 
 async def async_get_mp_from_net(hass, model):
     cs = aiohttp_client.async_get_clientsession(hass)
@@ -68,6 +132,8 @@ async def guess_mp_from_model(hass,model):
             "mapping": json.dumps(m["mapping"],separators=(',', ':')),
             "params": json.dumps(m["params"],separators=(',', ':')),
         }
+    if '.lock.' in model:
+        return LOCK_PRM
 
     cs = aiohttp_client.async_get_clientsession(hass)
     url_all = 'http://miot-spec.org/miot-spec-v2/instances?status=all'
@@ -83,13 +149,14 @@ async def guess_mp_from_model(hass,model):
         dev_list = dev_list.get('instances')
     else:
         dev_list = None
-    result = None
+    result = []
     if dev_list:
         for item in dev_list:
             if model == item['model']:
-                result = item
-        urn = result['type']
-        params = {'type': urn}
+                result.append(item)
+        urnlist = [URN(r['type']) for r in result]
+        urnlist.sort()
+        params = {'type': str(urnlist[0])}
         with async_timeout.timeout(10):
             try:
                 s = await cs.get(url_spec, params=params)
@@ -153,8 +220,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             'xiaomi_account': "登录小米账号",
             'localinfo': "接入设备"
         }
+        self._non_interactive = False
 
-    async def async_step_user(self, user_input=None):
+    async def async_step_user(self, user_input=None, non_interactive=False):   # 1. 选择操作
+        self._non_interactive = non_interactive
         if user_input is not None:
             if user_input['action'] == 'xiaomi_account':
                 return await self.async_step_xiaomi_account()
@@ -196,7 +265,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             })
         )
 
-    async def async_step_localinfo(self, user_input=None):
+    async def async_step_localinfo(self, user_input=None):  # 2. 手动接入，本地通信信息
         """Handle a flow initialized by the user."""
         errors = {}
 
@@ -259,18 +328,27 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     mapping_default = '{"switch":{"switch_status":{"siid":2,"piid":1}}}'
                     params_default = '{"switch":{"switch_status":{"power_on":true,"power_off":false}}}'
 
-                return self.async_show_form(
-                    step_id="devinfo",
-                    data_schema=vol.Schema({
-                        vol.Required('devtype', default=devtype_default): cv.multi_select(SUPPORTED_DOMAINS),
-                        vol.Required(CONF_MAPPING, default=mapping_default): str,
-                        vol.Required(CONF_CONTROL_PARAMS, default=params_default): str,
-                        vol.Optional('cloud_read'): bool,
-                        vol.Optional('cloud_write'): bool,
-                        }),
-                    description_placeholders={"device_info": device_info},
-                    errors=errors,
-                )
+                if not self._non_interactive:
+                    return self.async_show_form(
+                        step_id="devinfo",
+                        data_schema=vol.Schema({
+                            vol.Required('devtype', default=devtype_default): cv.multi_select(SUPPORTED_DOMAINS),
+                            vol.Required(CONF_MAPPING, default=mapping_default): str,
+                            vol.Required(CONF_CONTROL_PARAMS, default=params_default): str,
+                            vol.Optional('cloud_read'): bool,
+                            vol.Optional('cloud_write'): bool,
+                            }),
+                        description_placeholders={"device_info": device_info},
+                        errors=errors,
+                    )
+                else:
+                    return await self.async_step_devinfo({
+                        'devtype': devtype_default,
+                        CONF_MAPPING: mapping_default,
+                        CONF_CONTROL_PARAMS: params_default,
+                        'cloud_read': True,
+                        'cloud_write': True,
+                    })
             else:
                 return await self.async_step_xiaoai({
                     CONF_MODEL: self._model
@@ -289,7 +367,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    async def async_step_devinfo(self, user_input=None):
+    async def async_step_devinfo(self, user_input=None):    # 3. 修改mapping，params，云端设置
         errors = {}
         hint = ""
         if user_input is not None:
@@ -375,12 +453,15 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "no_local_access"
                 hint = f"错误信息: {ex}"
 
+        # if self._non_interactive:
+        #     return self.async_abort(reason="no_configurable_options")
+
         return self.async_show_form(
             step_id="devinfo",
             data_schema=vol.Schema({
-                vol.Required('devtype', default=user_input['devtype']): cv.multi_select(SUPPORTED_DOMAINS),
-                vol.Required(CONF_MAPPING, default=user_input[CONF_MAPPING]): str,
-                vol.Required(CONF_CONTROL_PARAMS, default=user_input[CONF_CONTROL_PARAMS]): str,
+                vol.Required('devtype', default=user_input.get('devtype')): cv.multi_select(SUPPORTED_DOMAINS),
+                vol.Required(CONF_MAPPING, default=user_input.get(CONF_MAPPING)): str,
+                vol.Required(CONF_CONTROL_PARAMS, default=user_input.get(CONF_CONTROL_PARAMS)): str,
                 vol.Optional('cloud_read'): bool,
                 vol.Optional('cloud_write'): bool,
                 }),
@@ -388,7 +469,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    async def async_step_cloudinfo(self, user_input=None):
+    async def async_step_cloudinfo(self, user_input=None):  # 4. 云端通信信息
         errors = {}
         if user_input is not None:
             self._input2['update_from_cloud'] = {}
@@ -413,7 +494,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Import a config flow from configuration."""
         return True
 
-    async def async_step_xiaomi_account(self, user_input=None, error=None):
+    async def async_step_xiaomi_account(self, user_input=None, error=None): # 登录小米账号
         if user_input:
             # if not user_input['servers']:
                 # return await self.async_step_xiaomi_account(error='no_servers')
@@ -437,10 +518,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # vol.Required('servers', default=['cn']):
                     # cv.multi_select(SERVERS)
             }),
-            errors={'base': error} if error else None
+            errors={'base': error} if error else {'base': 'account_tips'}
         )
 
-    async def async_step_xiaoai(self, user_input=None, error=None):
+    async def async_step_xiaoai(self, user_input=None, error=None): # 本地发现不了设备，需要手动输入model，输入后再修改mapping，params
         errors = {}
         if user_input is not None:
             self._input2 = {**self._input2, **user_input}
@@ -449,7 +530,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._info = await guess_mp_from_model(self.hass, self._model)
             hint = ""
             if self._info and self._info.get('mapping') != "{}":
-                hint += "\n根据您手动输入的 model，已经自动发现配置参数。\n如无特殊需要，无需修改下列内容。\n"
+                hint += f"\n根据 model (**{self._model}**)，已经自动发现配置参数。\n如无特殊需要，无需修改下列内容。\n"
                 devtype_default = self._info.get('device_type')
 
                 mp = self._info.get('mapping')
@@ -462,19 +543,27 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 mapping_default = '{"switch":{"switch_status":{"siid":2,"piid":1}}}'
                 params_default = '{"switch":{"switch_status":{"power_on":true,"power_off":false}}}'
 
-
-            return self.async_show_form(
-                step_id="devinfo",
-                data_schema=vol.Schema({
-                    vol.Required('devtype', default=devtype_default): cv.multi_select(SUPPORTED_DOMAINS),
-                    vol.Required(CONF_MAPPING, default=mapping_default): str,
-                    vol.Required(CONF_CONTROL_PARAMS, default=params_default): str,
-                    vol.Optional('cloud_read'): bool,
-                    vol.Optional('cloud_write'): bool,
-                }),
-                description_placeholders={"device_info": hint},
-                errors=errors,
-            )
+            if not self._non_interactive:
+                return self.async_show_form(
+                    step_id="devinfo",
+                    data_schema=vol.Schema({
+                        vol.Required('devtype', default=devtype_default): cv.multi_select(SUPPORTED_DOMAINS),
+                        vol.Required(CONF_MAPPING, default=mapping_default): str,
+                        vol.Required(CONF_CONTROL_PARAMS, default=params_default): str,
+                        vol.Optional('cloud_read', default=True): bool,
+                        vol.Optional('cloud_write', default=True): bool,
+                    }),
+                    description_placeholders={"device_info": hint},
+                    errors=errors,
+                )
+            else:
+                return await self.async_step_devinfo({
+                    'devtype': devtype_default,
+                    CONF_MAPPING: mapping_default,
+                    CONF_CONTROL_PARAMS: params_default,
+                    'cloud_read': True,
+                    'cloud_write': True,
+                })
 
         return self.async_show_form(
             step_id='xiaoai',
@@ -483,6 +572,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             }),
             errors={'base': 'no_connect_warning'}
         )
+
+    async def async_step_batch_add(self, info):
+        return await self.async_step_user({
+            'action': info['did']
+        }, True)
 
     @staticmethod
     @callback
@@ -523,6 +617,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_account(self, user_input=None):
         if user_input is not None:
+            if user_input['batch_add']:
+                return await self.async_step_batch_agreement()
             self._input2.update(user_input)
             self._steps.pop(0)
             return await self._steps[0]
@@ -531,6 +627,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             step_id='account',
             data_schema=vol.Schema({
                 vol.Required('server_location', default=self._input2.get('server_location') or 'cn'): vol.In(SERVERS),
+                vol.Optional('batch_add', default=False): bool,
             })
         )
 
@@ -589,13 +686,54 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             }),
         )
 
-    async def async_finish(self):
+    async def async_step_select_devices(self, user_input=None):
+        errors = {}
+        if user_input is not None:
+            for device in user_input['devices']:
+                self.hass.async_add_job(self.hass.config_entries.flow.async_init(
+                    DOMAIN, context={"source": "batch_add"}, data={'did': device}
+                ))
+            return self.async_create_entry(title="", data=None)
+
+        devlist = {}
+        for device in self.hass.data[DOMAIN]['micloud_devices']:
+            if device['did'] not in devlist:
+                dt = get_conn_type(device)
+                dt = "WiFi" if dt == 0 else "ZigBee" if dt == 1 else "BLE" if dt == 2 \
+                                        else "BLE Mesh" if dt == 3 else "Unknown"
+                name = f"{device['name']} ({dt}{', '+device['localip'] if (dt == '''WiFi''') else ''})"
+                devlist[device['did']] = name
+        return self.async_show_form(
+            step_id='select_devices',
+            data_schema=vol.Schema({
+                vol.Required('devices', default=[]): cv.multi_select(devlist),
+            }),
+            errors=errors,
+        )
+
+    async def async_step_batch_agreement(self, user_input=None):
+        errors = {}
+        if user_input is not None:
+            if not user_input['iagree']:
+                errors['base'] = 'plz_agree'
+            else:
+                return await self.async_step_select_devices()
+        return self.async_show_form(
+            step_id='batch_agreement',
+            data_schema=vol.Schema({
+                vol.Optional('iagree', default=False): bool,
+            }),
+            errors=errors,
+        )
+
+    async def async_finish(self, reload=True):
         if self._prm:
             self._input2[CONF_CONTROL_PARAMS] = json.dumps(self._prm,separators=(',', ':'))
         self.hass.config_entries.async_update_entry(
             self.config_entry, data=self._input2
         )
-        await self.hass.config_entries.async_reload(
-            self.config_entry.entry_id
-        )
+        if reload:
+            await self.hass.config_entries.async_reload(
+                self.config_entry.entry_id
+            )
         return self.async_create_entry(title="", data=None)

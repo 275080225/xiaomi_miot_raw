@@ -23,11 +23,10 @@ from homeassistant.components.fan import (
 from homeassistant.const import *
 from homeassistant.exceptions import PlatformNotReady
 from homeassistant.util import color
-from miio.device import Device
 from miio.exceptions import DeviceException
-from miio.miot_device import MiotDevice
+from .deps.miio_new import MiotDevice
 
-from . import GenericMiotDevice, ToggleableMiotDevice, MiotSubToggleableDevice, MiotSubDevice, dev_info
+from . import GenericMiotDevice, ToggleableMiotDevice, MiotSubToggleableDevice, MiotSubDevice, dev_info, async_generic_setup_platform
 from .deps.const import (
     DOMAIN,
     CONF_UPDATE_INSTANT,
@@ -64,118 +63,25 @@ SUPPORT_PRESET_MODE = 8
 # pylint: disable=unused-argument
 @asyncio.coroutine
 async def async_setup_platform(hass, config, async_add_devices, discovery_info=None):
-    """Set up the fan from config."""
-
-    if DATA_KEY not in hass.data:
-        hass.data[DATA_KEY] = {}
-
-    host = config.get(CONF_HOST)
-    token = config.get(CONF_TOKEN)
-    mapping = config.get(CONF_MAPPING)
-    params = config.get(CONF_CONTROL_PARAMS)
-
-    mappingnew = {}
-
-    main_mi_type = None
-    other_mi_type = []
-
-    for t in MAP[TYPE]:
-        if mapping.get(t):
-            other_mi_type.append(t)
-        if 'main' in (params.get(t) or ""):
-            main_mi_type = t
-
-    try:
-        other_mi_type.remove(main_mi_type)
-    except:
-        pass
-
-    if main_mi_type or type(params) == OrderedDict:
-        for k,v in mapping.items():
-            for kk,vv in v.items():
-                mappingnew[f"{k[:10]}_{kk}"] = vv
-
-        _LOGGER.info("Initializing %s with host %s (token %s...)", config.get(CONF_NAME), host, token[:5])
-        if type(params) == OrderedDict:
-            miio_device = MiotDevice(ip=host, token=token, mapping=mapping)
-        else:
-            miio_device = MiotDevice(ip=host, token=token, mapping=mappingnew)
-        try:
-            if host == DUMMY_IP and token == DUMMY_TOKEN:
-                raise DeviceException
-            device_info = miio_device.info()
-            model = device_info.model
-            _LOGGER.info(
-                "%s %s %s detected",
-                model,
-                device_info.firmware_version,
-                device_info.hardware_version,
-            )
-
-        except DeviceException as de:
-            if not config.get(CONF_CLOUD):
-                _LOGGER.warn(de)
-                raise PlatformNotReady
-            else:
-                if not (di := config.get('cloud_device_info')):
-                    _LOGGER.error(f"未能获取到设备信息，请删除 {config.get(CONF_NAME)} 重新配置。")
-                    raise PlatformNotReady
-                else:
-                    device_info = dev_info(
-                        di['model'],
-                        di['mac'],
-                        di['fw_version'],
-                        ""
-                    )
-        if main_mi_type == 'washer':
-            device = MiotWasher(miio_device, config, device_info, hass, main_mi_type)
-        else:
-            device = MiotFan(miio_device, config, device_info, hass, main_mi_type)
-
-        _LOGGER.info(f"{main_mi_type} is the main device of {host}.")
-        hass.data[DOMAIN]['miot_main_entity'][host] = device
-        hass.data[DOMAIN]['entities'][device.unique_id] = device
-        async_add_devices([device], update_before_add=True)
-    if other_mi_type:
-        retry_time = 1
-        while True:
-            if parent_device := hass.data[DOMAIN]['miot_main_entity'].get(host):
-                break
-            else:
-                retry_time *= 2
-                if retry_time > 120:
-                    _LOGGER.error(f"The main device of {config.get(CONF_NAME)}({host}) is still not ready after 120 seconds!")
-                    raise PlatformNotReady
-                else:
-                    _LOGGER.debug(f"The main device of {config.get(CONF_NAME)}({host}) is still not ready after {retry_time - 1} seconds.")
-                    await asyncio.sleep(retry_time)
-
-        for k,v in mapping.items():
-            if k in MAP[TYPE]:
-                for kk,vv in v.items():
-                    mappingnew[f"{k[:10]}_{kk}"] = vv
-
-        devices = []
-
-        for item in other_mi_type:
-            if item == 'a_l':
-                devices.append(MiotActionList(parent_device, mapping.get(item), item))
-            else:
-                devices.append(MiotSubFan(parent_device, mapping.get(item), params.get(item), item))
-        async_add_devices(devices, update_before_add=True)
+    await async_generic_setup_platform(
+        hass,
+        config,
+        async_add_devices,
+        discovery_info,
+        TYPE,
+        {'default': MiotFan, 'washer': MiotWasher},
+        {'default': MiotSubFan, 'a_l': MiotActionList}
+    )
 
 async def async_setup_entry(hass, config_entry, async_add_entities):
     config = copy.copy(hass.data[DOMAIN]['configs'].get(config_entry.entry_id, dict(config_entry.data)))
-    # config[CONF_MAPPING] = config[CONF_MAPPING][TYPE]
-    # config[CONF_CONTROL_PARAMS] = config[CONF_CONTROL_PARAMS][TYPE]
     await async_setup_platform(hass, config, async_add_entities)
 
 class MiotFan(ToggleableMiotDevice, FanEntity):
-    """ TODO stepless speed """
-
     def __init__(self, device, config, device_info, hass, main_mi_type):
         ToggleableMiotDevice.__init__(self, device, config, device_info, hass, main_mi_type)
         self._speed = None
+        self._mode = None
         self._oscillation = None
 
     @property
@@ -185,6 +91,8 @@ class MiotFan(ToggleableMiotDevice, FanEntity):
         if self._did_prefix + 'oscillate' in self._mapping:
             s |= SUPPORT_OSCILLATE
         if self._did_prefix + 'speed' in self._mapping:
+            s |= (SUPPORT_SET_SPEED if not NEW_FAN else SUPPORT_SET_SPEED)
+        if self._did_prefix + 'mode' in self._mapping:
             s |= (SUPPORT_SET_SPEED if not NEW_FAN else SUPPORT_PRESET_MODE)
         return s
 
@@ -192,36 +100,43 @@ class MiotFan(ToggleableMiotDevice, FanEntity):
     def speed_list(self) -> list:
         """Get the list of available speeds."""
         if NEW_FAN:
+            # 这个是假的！！
             return None
         else:
-            return list(self._ctrl_params['speed'].keys())
+            if 'speed' in self._ctrl_params:
+                return list(self._ctrl_params['speed'].keys())
+            elif 'mode' in self._ctrl_params:
+                return list(self._ctrl_params['mode'].keys())
+
+    @property
+    def _speed_list_without_preset_modes(self) -> list:
+        return list(self._ctrl_params['speed'].keys())
 
     @property
     def speed(self):
         """Return the current speed."""
-        return self._speed if not NEW_FAN else None
+        return (self._speed or self._mode) if not NEW_FAN else self._speed
 
     @property
     def preset_modes(self) -> list:
         """Get the list of available preset_modes."""
-        return list(self._ctrl_params['speed'].keys())
+        try:
+            return list(self._ctrl_params['mode'].keys())
+        except KeyError:
+            return []
 
     @property
     def preset_mode(self):
         """Return the current speed."""
-        try:
-            self._speed = self.get_key_by_value(self._ctrl_params['speed'],self.device_state_attributes[self._did_prefix + 'speed'])
-        except KeyError:
-            self._speed = None
-        return self._speed
+        return self._mode
 
-    @property
-    def percentage(self):
-        return None
+    # @property
+    # def percentage(self):
+    #     return None
 
     @property
     def speed_count(self):
-        return len(self.preset_modes)
+        return len(self._speed_list_without_preset_modes)
 
     @property
     def oscillating(self):
@@ -247,27 +162,38 @@ class MiotFan(ToggleableMiotDevice, FanEntity):
         result = await self.set_property_new(multiparams = parameters)
         if result:
             self._state = True
+            if speed is not None:
+                self._speed = speed
+            self._skip_update = True
+
+    async def async_set_speed(self, speed: str) -> None:
+        result = await self.set_property_new(self._did_prefix + "speed", self._ctrl_params['speed'][speed])
+        if result:
             self._speed = speed
             self._skip_update = True
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         """Set new preset mode."""
-        result = await self.set_property_new(self._did_prefix + "speed", self._ctrl_params['speed'][preset_mode])
+        result = await self.set_property_new(self._did_prefix + "mode", self._ctrl_params['mode'][preset_mode])
         if result:
             self._state = True
-            self._speed = preset_mode
+            self._mode = preset_mode
             self._skip_update = True
 
-    async def async_set_percentage(self, percentage: int) -> None:
-        """Set the speed percentage of the fan."""
-        pass
+    # async def async_set_percentage(self, percentage: int) -> None:
+    #     """Set the speed percentage of the fan."""
+    #     pass
 
     def _handle_platform_specific_attrs(self):
         super()._handle_platform_specific_attrs()
         try:
             self._speed = self.get_key_by_value(self._ctrl_params['speed'],self._state_attrs.get(self._did_prefix + 'speed'))
         except KeyError:
-            pass
+            self._speed = None
+        try:
+            self._mode = self.get_key_by_value(self._ctrl_params['mode'],self._state_attrs.get(self._did_prefix + 'mode'))
+        except KeyError:
+            self._mode = None
         self._oscillation = self._state_attrs.get(self._did_prefix + 'oscillate')
 
 class MiotSubFan(MiotSubToggleableDevice, FanEntity):
@@ -336,7 +262,7 @@ class MiotSubFan(MiotSubToggleableDevice, FanEntity):
     async def async_oscillate(self, oscillating: bool) -> None:
         """Set oscillation."""
         # result = await self.set_property_new(self._did_prefix + "oscillate",self._ctrl_params['oscillate'][oscillating])
-        result = await self.set_property_new(self._did_prefix + "oscillate", oscillating)
+        result = await self._parent_device.set_property_new(self._did_prefix + "oscillate", oscillating)
 
         if result:
             self._oscillation = True
@@ -344,7 +270,7 @@ class MiotSubFan(MiotSubToggleableDevice, FanEntity):
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         """Set new preset mode."""
-        result = await self.set_property_new(self._did_prefix + "speed", self._ctrl_params['speed'][preset_mode])
+        result = await self._parent_device.set_property_new(self._did_prefix + "speed", self._ctrl_params['speed'][preset_mode])
         if result:
             self._state = True
             self._speed = preset_mode
@@ -369,7 +295,8 @@ class MiotSubFan(MiotSubToggleableDevice, FanEntity):
             self._skip_update = True
 
 class MiotActionList(MiotSubDevice, FanEntity):
-    def __init__(self, parent_device, mapping, mitype):
+    def __init__(self, parent_device, mapping, params, mitype):
+        """params is not needed. We keep it here to make the ctor same."""
         super().__init__(parent_device, mapping, {}, mitype)
         self._name = f'{parent_device.name} 动作列表'
         self._action_list = []
@@ -444,6 +371,7 @@ class MiotActionList(MiotSubDevice, FanEntity):
         self._state2 = STATE_ON
 
 class MiotWasher(ToggleableMiotDevice, FanEntity):
+    # TODO washer has many controllable properties. Try to add them (#96)
     def __init__(self, device, config, device_info, hass, main_mi_type):
         ToggleableMiotDevice.__init__(self, device, config, device_info, hass, main_mi_type)
         self._speed = None

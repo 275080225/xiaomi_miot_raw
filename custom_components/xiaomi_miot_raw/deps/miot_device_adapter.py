@@ -56,6 +56,21 @@ def get_type_by_mitype(mitype:str):
 
 translate = {"on":"switch_status", "fan_level":"speed"}
 
+def get_range_by_list(value_list: list):
+    l = [item['value'] for item in value_list]
+    l.sort()
+    if len(l) <= 1:
+        _LOGGER.error(f"Wrong value list: {value_list}")
+        return None
+    else:
+        d = l[1] - l[0]
+        for i in range(2, len(l)):
+            if l[i] - l[i-1] != d:
+                _LOGGER.error(f"Cannot convert value list {value_list} to range: Not a arithmetic progression!")
+                return None
+        return [l[0], l[-1], d]
+
+
 class MiotAdapter:
     def __init__(self, spec: dict):
         self.spec = spec
@@ -145,13 +160,13 @@ class MiotAdapter:
                     "piid": p.piid
                 }
             if devtype == 'fan':
-                if 'speed' not in ret and 'mode' in ret:
-                    ret['speed'] = ret.pop('mode')
+                # if 'speed' not in ret and 'mode' in ret:
+                #     ret['speed'] = ret.pop('mode')
                 if 'horizontal_swing' in ret:
                     ret['oscillate'] = ret.pop('horizontal_swing')
                 elif 'vertical_swing' in ret:
                     ret['oscillate'] = ret.pop('vertical_swing')
-            if devtype == 'humidifier' and 'mode' not in ret and 'speed' in ret:
+            if devtype in ('humidifier', 'dehumidifier') and 'mode' not in ret and 'speed' in ret:
                 # deerma.humidifier.mjjsq
                 ret['mode'] = ret.pop('speed')
             if devtype == 'cover':
@@ -189,12 +204,26 @@ class MiotAdapter:
                         'power_off': False
                     }
 
+            # 把某个 service 里的 property 单独提出来
+            # 例如：晾衣架的烘干，新风机的辅热
             if p := propdict.get('dryer'):
                 if p.format_ == 'bool':
                     ret['dryer'] = {
                         'power_on': True,
                         'power_off': False
                     }
+
+            if p := propdict.get('heater'):
+                if p.format_ == 'bool':
+                    ret['heater'] = {
+                        'power_on': True,
+                        'power_off': False
+                    }
+
+            if p := propdict.get('fault'):
+                if vl := p.vlist:
+                    lst = {item['description']: item['value'] for item in vl}
+                    ret['fault'] = lst
 
             if p := propdict.get('fan_level'):
                 if vl := p.vlist:
@@ -224,6 +253,11 @@ class MiotAdapter:
                 if vl := p.vlist:
                     lst = {item['description']: item['value'] for item in vl}
                     ret['drying_level'] = lst
+
+            if p := propdict.get('status'):
+                if vl := p.vlist:
+                    lst = {item['description']: item['value'] for item in vl}
+                    ret['status'] = lst
 
             # print(devtype)
             if devtype == 'light':
@@ -303,7 +337,7 @@ class MiotAdapter:
                         False: False
                     }
 
-            if devtype == 'humidifier':
+            if devtype in ('humidifier', 'dehumidifier'):
                 # deerma.humidifier.mjjsq
                 if p := propdict.get('fan_level'):
                     if vl := p.vlist:
@@ -331,6 +365,11 @@ class MiotAdapter:
                 if vr := p.vrange:
                     ret['target_humidity'] = {
                         'value_range': vr
+                    }
+                # nwt.derh.330ef uses value list instead of range, convert it
+                elif vl := p.vlist:
+                    ret['target_humidity'] = {
+                        'value_range': get_range_by_list(vl)
                     }
 
             if devtype == 'sensor':
@@ -382,15 +421,30 @@ class MiotAdapter:
         if 'speaker' in ret and 'play_control' in ret:
             ret['speaker'] = {**ret['speaker'], **ret.pop('play_control')}
 
+        if 'ambient_light' in ret and 'ambient_light_custom' in ret:
+            ret['ambient_light'] = {**ret['ambient_light'], **ret.pop('ambient_light_custom')}
+
+        if 'humidifier' in ret and 'environment' in ret:
+            # deerma.humidifier.mjjsq target_humidity misplaced
+            if 'target_humidity' in ret['environment']:
+                ret['humidifier']['target_humidity'] = (ret['environment'].pop('target_humidity'))
+
+        # 把某个 service 里的 property 单独提出来
+        # 例如：晾衣架的烘干，新风机的辅热
         if 'airer' in ret:
             if 'dryer' in ret['airer']:
-                if 'dryer' not in ret: ret['dryer'] = {}
+                ret.setdefault('dryer', {})
                 ret['dryer'].update({'switch_status': ret['airer'].pop('dryer')})
                 self.devtypeset.add('fan')
             if 'drying_level' in ret['airer']:
-                if 'dryer' not in ret: ret['dryer'] = {}
+                ret.setdefault('dryer', {})
                 ret['dryer'].update({'speed': ret['airer'].pop('drying_level')})
 
+        if 'air_fresh' in ret:
+            if 'heater' in ret['air_fresh']:
+                ret.setdefault('air_fresh_heater', {})
+                ret['air_fresh_heater'].update({'switch_status': ret['air_fresh'].pop('heater')})
+                self.devtypeset.add('fan')
         return ret
 
     def get_all_params(self):
@@ -412,13 +466,28 @@ class MiotAdapter:
         if 'speaker' in ret and 'play_control' in ret:
             ret['speaker'] = {**ret['speaker'], **ret.pop('play_control')}
 
+        if 'ambient_light' in ret and 'ambient_light_custom' in ret:
+            ret['ambient_light'] = {**ret['ambient_light'], **ret.pop('ambient_light_custom')}
+
+        if 'humidifier' in ret and 'environment' in ret:
+            # deerma.humidifier.mjjsq target_humidity misplaced
+            if 'target_humidity' in ret['environment']:
+                ret['humidifier']['target_humidity'] = (ret['environment'].pop('target_humidity'))
+
+        # 把某个 service 里的 property 单独提出来
+        # 例如：晾衣架的烘干，新风机的辅热
         if 'airer' in ret:
             if 'dryer' in ret['airer']:
-                if 'dryer' not in ret: ret['dryer'] = {}
+                ret.setdefault('dryer', {})
                 ret['dryer'].update({'switch_status': ret['airer'].pop('dryer')})
             if 'drying_level' in ret['airer']:
-                if 'dryer' not in ret: ret['dryer'] = {}
+                ret.setdefault('dryer', {})
                 ret['dryer'].update({'speed': ret['airer'].pop('drying_level')})
+
+        if 'air_fresh' in ret:
+            if 'heater' in ret['air_fresh']:
+                ret.setdefault('air_fresh_heater', {})
+                ret['air_fresh_heater'].update({'switch_status': ret['air_fresh'].pop('heater')})
 
         if not has_main:
             try:

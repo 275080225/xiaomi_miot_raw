@@ -12,9 +12,8 @@ from homeassistant.components.lock import LockEntity, PLATFORM_SCHEMA
 from homeassistant.const import *
 from homeassistant.exceptions import PlatformNotReady
 from homeassistant.util import color
-from miio.device import Device
 from miio.exceptions import DeviceException
-from miio.miot_device import MiotDevice
+from .deps.miio_new import MiotDevice
 
 from . import GenericMiotDevice, ToggleableMiotDevice, MiotSubDevice, dev_info
 from .deps.const import (
@@ -77,7 +76,7 @@ async def async_setup_platform(hass, config, async_add_devices, discovery_info=N
     if other_mi_type:
         retry_time = 1
         while True:
-            if parent_device := hass.data[DOMAIN]['miot_main_entity'].get(host):
+            if parent_device := hass.data[DOMAIN]['miot_main_entity'].get(f'{host}-{config.get(CONF_NAME)}'):
                 break
             else:
                 retry_time *= 2
@@ -103,8 +102,6 @@ async def async_setup_platform(hass, config, async_add_devices, discovery_info=N
 
 async def async_setup_entry(hass, config_entry, async_add_entities):
     config = copy.copy(hass.data[DOMAIN]['configs'].get(config_entry.entry_id, dict(config_entry.data)))
-    # config[CONF_MAPPING] = config[CONF_MAPPING][TYPE]
-    # config[CONF_CONTROL_PARAMS] = config[CONF_CONTROL_PARAMS][TYPE]
     await async_setup_platform(hass, config, async_add_entities)
 
 class MiotPhysicalControlLock(MiotSubDevice, LockEntity):
