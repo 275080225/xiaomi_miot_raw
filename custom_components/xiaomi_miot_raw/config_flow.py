@@ -261,7 +261,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id='user',
             data_schema=vol.Schema({
-                vol.Required('action', default='localinfo'): vol.In(self._actions),
+                vol.Required('action', default=list(self._actions)[0]): vol.In(self._actions),
             })
         )
 
@@ -604,10 +604,12 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         else:
             if 'indicator_light' in self._prm or 'physical_controls_locked' in self._prm:
                 self._steps.append(self.async_step_light_and_lock())
-            if self._input2['devtype'] == ['sensor']:
+            if 'sensor' in self._input2['devtype']:
                 self._steps.append(self.async_step_sensor())
             if 'climate' in self._input2['devtype']:
                 self._steps.append(self.async_step_climate())
+            if 'cover' in self._input2['devtype']:
+                self._steps.append(self.async_step_cover())
 
         if self._steps:
             self._steps.append(self.async_finish())
@@ -668,6 +670,26 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             step_id='sensor',
             data_schema=vol.Schema({
                 vol.Optional('show_individual_sensor', default=d): bool,
+            }),
+        )
+
+    async def async_step_cover(self, user_input=None):
+        if user_input is not None:
+            for device,p in self._prm.items():
+                if device in MAP['cover']:
+                    p.update(user_input)
+            self._steps.pop(0)
+            return await self._steps[0]
+
+        d = False
+        for device,p in self._prm.items():
+            if device in MAP['cover'] and p.get('reverse_position_percentage'):
+                d = True
+                break
+        return self.async_show_form(
+            step_id='cover',
+            data_schema=vol.Schema({
+                vol.Optional('reverse_position_percentage', default=d): bool,
             }),
         )
 
