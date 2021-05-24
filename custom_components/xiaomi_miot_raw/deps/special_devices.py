@@ -14,6 +14,16 @@ SPECIAL_DEVICES={
         "mapping":{"motion":{"key":"device_log","type":"prop"}},
         "params":{"event_based":True}
     },
+    "lumi.motion.bmgl01": {
+        "device_type":['sensor'],
+        "mapping":{"motion":{"key":"device_log","type":"prop"}},
+        "params":{"event_based":True}
+    },
+    "lumi.sensor_motion.aq2": {
+        "device_type":['sensor'],
+        "mapping":{"motion":{"key":"device_log","type":"prop"}},
+        "params":{"event_based":True}
+    },
     "cuco.plug.cp2":{
         "device_type": ['switch'],
         "mapping": {"switch": {"switch_status": {"siid": 2, "piid": 1}}},
@@ -23,7 +33,17 @@ SPECIAL_DEVICES={
         "device_type": ['switch', 'sensor'],
         "mapping": {"sleep_monitor":{"sleep_state":{"siid":2,"piid":1},"realtime_heart_rate":{"siid":4,"piid":10},"realtime_breath_rate":{"siid":4,"piid":11},"realtime_sleepstage":{"siid":4,"piid":12}},"switch":{"switch_status":{"siid":4,"piid":15}}},
         "params": {"sleep_monitor":{"sleep_state":{"access":5,"format":"uint8","unit":None,"value_list":{"Out of Bed":0,"Awake":1,"Light Sleep":3,"Deep Sleep":4,"Rapid Eye Movement":2}},"realtime_heart_rate":{"unit":"bpm"},"realtime_breath_rate":{"unit":"/min"},"main":True},"switch":{"switch_status":{"power_on":True,"power_off":False}}}
-    }
+    },
+    "hhcc.plantmonitor.v1": {
+        "device_type": ['sensor'],
+        "mapping": {"plant_monitor":{"temperature":{"siid":3,"piid":2},"relative_humidity":{"siid":2,"piid":1},"soil_ec":{"siid":2,"piid":2},"illumination":{"siid":2,"piid":3}}},
+        "params": {"plant_monitor": {"temperature": {"access": 5, "format": "float", "unit": "celsius"}, "relative_humidity": {"access": 5, "format": "float", "unit": "percentage", "value_range": [0, 100, 1]}, "soil_ec": {"access": 5, "format": "uint16", "unit": "µS/cm", "value_range": [0, 5000, 1]}, "illumination": {"access": 5, "format": "float", "unit": "lux", "value_range": [0, 10000, 1]}, "main": True}}
+    },
+    "zhimi.heater.na1": {
+        "device_type": ['climate', 'switch', 'light', 'lock'],
+        "mapping": {"heater": {"fault": {"siid": 2, "piid": 1}, "switch_status": {"siid": 2, "piid": 2}, "speed": {"siid": 2, "piid": 3}, "horizontal_swing": {"siid": 2, "piid": 4}}, "indicator_light": {"brightness": {"siid": 6, "piid": 1}}, "physical_controls_locked": {"physical_controls_locked": {"siid": 7, "piid": 1}}, "switch": {"switch_status":{"siid":3,"piid":1}}, "switch_2": {"switch_status":{"siid":8,"piid":3}}},
+        "params": {"heater": {"switch_status": {"power_on": True, "power_off": False}, "fault": {"No faults": 0}, "horizontal_swing":{"off":0,"on":1}, "speed": {"High": 1, "Low": 2}, "main": True},"switch":{"switch_status":{"power_on":True,"power_off":False}}, "indicator_light": {"brightness": {"value_range": [0, 2, 1]}}, "physical_controls_locked": {"enabled": False}, "switch_2":{"switch_status":{"power_on": True,"power_off": False}}}
+    },
 }
 
 
