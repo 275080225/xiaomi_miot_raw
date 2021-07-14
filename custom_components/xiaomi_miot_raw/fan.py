@@ -19,6 +19,7 @@ from homeassistant.components.fan import (
     SPEED_OFF,
     SUPPORT_OSCILLATE,
     SUPPORT_SET_SPEED,
+    SUPPORT_DIRECTION,
     FanEntity)
 from homeassistant.const import *
 from homeassistant.exceptions import PlatformNotReady
@@ -64,7 +65,10 @@ SUPPORT_PRESET_MODE = 8
 # pylint: disable=unused-argument
 @asyncio.coroutine
 async def async_setup_platform(hass, config, async_add_devices, discovery_info=None):
-    hass.data[DOMAIN]['add_handler'].setdefault(TYPE, async_add_devices)
+    hass.data[DOMAIN]['add_handler'].setdefault(TYPE, {})
+    if 'config_entry' in config:
+        id = f"{config.get(CONF_HOST)}-{config.get(CONF_NAME)}"
+        hass.data[DOMAIN]['add_handler'][TYPE].setdefault(id, async_add_devices)
     await async_generic_setup_platform(
         hass,
         config,
@@ -92,6 +96,8 @@ class MiotFan(ToggleableMiotDevice, FanEntity):
         s = 0
         if self._did_prefix + 'oscillate' in self._mapping:
             s |= SUPPORT_OSCILLATE
+            if self._did_prefix + 'motor_control' in self._mapping:
+                s |= SUPPORT_DIRECTION
         if self._did_prefix + 'speed' in self._mapping:
             s |= (SUPPORT_SET_SPEED if not NEW_FAN else SUPPORT_SET_SPEED)
         if self._did_prefix + 'mode' in self._mapping:
@@ -162,13 +168,23 @@ class MiotFan(ToggleableMiotDevice, FanEntity):
             self._skip_update = True
 
     async def async_turn_on(self, speed: str = None, **kwargs) -> None:
-        """Turn on the entity."""
-        parameters = [{**{'did': self._did_prefix + "switch_status", 'value': self._ctrl_params['switch_status']['power_on']},**(self._mapping[self._did_prefix + 'switch_status'])}]
+        """旧版HA前端调风速是这个"""
+        result = True
+        if not self.is_on:
+            result &= await self.set_property_new(self._did_prefix + "switch_status", self._ctrl_params['switch_status']['power_on'])
 
-        if speed:
-            parameters.append({**{'did': self._did_prefix + "speed", 'value': self._ctrl_params['speed'][speed]}, **(self._mapping[self._did_prefix + 'speed'])})
+        parameters = []
+        if 'from_stepless_speed' in kwargs:
+            parameters.append({**{'did': self._did_prefix + "stepless_speed", 'value': speed}, **(self._mapping[self._did_prefix + 'stepless_speed'])})
 
-        result = await self.set_property_new(multiparams = parameters)
+        elif speed:
+            if 'speed' in self._ctrl_params:
+                parameters.append({**{'did': self._did_prefix + "speed", 'value': self._ctrl_params['speed'][speed]}, **(self._mapping[self._did_prefix + 'speed'])})
+            elif 'mode' in self._ctrl_params:
+                parameters.append({**{'did': self._did_prefix + "mode", 'value': self._ctrl_params['mode'][speed]}, **(self._mapping[self._did_prefix + 'mode'])})
+
+        if parameters:
+            result &= await self.set_property_new(multiparams = parameters)
         if result:
             self._state = True
             if speed is not None:
@@ -176,13 +192,11 @@ class MiotFan(ToggleableMiotDevice, FanEntity):
             self._skip_update = True
 
     async def async_set_speed(self, speed: str) -> None:
-        if 'stepless_speed' not in self._ctrl_params:
-            result = await self.set_property_new(self._did_prefix + "speed", self._ctrl_params['speed'][speed])
+        """HomeKit调风速是这个，旧版speed形如“Level1”，新版是百分比"""
+        if 'stepless_speed' not in self._ctrl_params or not NEW_FAN:
+            await self.async_turn_on(speed)
         else:
-            result = await self.set_property_new(self._did_prefix + "stepless_speed", speed)
-        if result:
-            self._speed = speed
-            self._skip_update = True
+            await self.async_turn_on(speed, from_stepless_speed = True)
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         """Set new preset mode."""
@@ -192,6 +206,23 @@ class MiotFan(ToggleableMiotDevice, FanEntity):
             self._mode = preset_mode
             self._skip_update = True
 
+    @property
+    def current_direction(self) -> str:
+        """Fan direction."""
+        return None
+
+    async def async_set_direction(self, direction: str) -> None:
+        """Set the direction of the fan."""
+        if direction == 'forward':
+            d = 'left'
+        elif direction == 'reverse':
+            d = 'right'
+        else:
+            d = direction
+        if d not in self._ctrl_params['motor_control']:
+            raise TypeError(f"Your fan does not support {direction}.")
+        await self.set_property_new(self._did_prefix + "motor_control", self._ctrl_params['motor_control'][d])
+
     # async def async_set_percentage(self, percentage: int) -> None:
     #     """Set the speed percentage of the fan."""
     #     pass
@@ -199,7 +230,8 @@ class MiotFan(ToggleableMiotDevice, FanEntity):
     def _handle_platform_specific_attrs(self):
         super()._handle_platform_specific_attrs()
         try:
-            self._speed = self.get_key_by_value(self._ctrl_params['speed'],self._state_attrs.get(self._did_prefix + 'speed')) if 'stepless_speed' not in self._ctrl_params \
+            self._speed = self.get_key_by_value(self._ctrl_params['speed'],self._state_attrs.get(self._did_prefix + 'speed')) \
+                if 'stepless_speed' not in self._ctrl_params or not NEW_FAN \
                 else self._state_attrs.get(self._did_prefix + 'stepless_speed')
         except KeyError:
             self._speed = None
@@ -311,7 +343,7 @@ class MiotActionList(MiotSubDevice, FanEntity):
     def __init__(self, parent_device, mapping, params, mitype):
         """params is not needed. We keep it here to make the ctor same."""
         super().__init__(parent_device, mapping, {}, mitype)
-        self._name = f'{parent_device.name} 动作列表'
+        self._name_suffix = '动作列表'
         self._action_list = []
         for k, v in mapping.items():
             if 'aiid' in v:
@@ -495,7 +527,7 @@ class MiotWasher(ToggleableMiotDevice, FanEntity):
                             value_list=v['value_list'],
                         ))
         if ett_to_add:
-            self._hass.data[DOMAIN]['add_handler']['fan'](ett_to_add, update_before_add=True)
+            self._hass.data[DOMAIN]['add_handler']['fan'][f"{self._device.ip}-{self.name}"](ett_to_add, update_before_add=True)
 
 class SelectorEntity(MiotSubDevice, FanEntity):
     def __init__(self, parent_device, **kwargs):

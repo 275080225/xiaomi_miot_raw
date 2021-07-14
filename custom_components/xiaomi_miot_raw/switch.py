@@ -1,10 +1,8 @@
 import asyncio
-import json
 import logging
 from functools import partial
 
 from datetime import timedelta
-from collections import OrderedDict
 import json
 from collections import OrderedDict
 import homeassistant.helpers.config_validation as cv
@@ -47,7 +45,10 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
 # pylint: disable=unused-argument
 @asyncio.coroutine
 async def async_setup_platform(hass, config, async_add_devices, discovery_info=None):
-    hass.data[DOMAIN]['add_handler'].setdefault(TYPE, async_add_devices)
+    hass.data[DOMAIN]['add_handler'].setdefault(TYPE, {})
+    if 'config_entry' in config:
+        id = f"{config.get(CONF_HOST)}-{config.get(CONF_NAME)}"
+        hass.data[DOMAIN]['add_handler'][TYPE].setdefault(id, async_add_devices)
     await async_generic_setup_platform(
         hass,
         config,

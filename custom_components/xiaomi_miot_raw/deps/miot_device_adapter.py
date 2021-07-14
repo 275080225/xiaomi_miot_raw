@@ -38,17 +38,25 @@ class Action:
     in_         :list
     out_        :list
 
-def name_by_type(typ):
-    arr = f'{typ}:::'.split(':')
-    nam = arr[3] or ''
-    nam = re.sub(r'\W+', '_', nam)
-    return nam
+def get_id_by_instance(s:dict):
+    if 'type' not in s:
+        return ''
+    try:
+        type_ = f'{s["type"]}:::'.split(':')[3]
+        r = re.sub(r'\W+', '_', type_)
+        if 'description' in s:
+            if r == 'switch' and 'USB' in s['description']:
+                r = 'switch_usb'
+        return r
+    except Exception as ex:
+        _LOGGER.error(ex)
+        return ''
 
 ACCESS_READ = 0b001
 ACCESS_WRITE = 0b010
 ACCESS_NOTIFY = 0b100
 
-CUSTOM_SERVICES = {'custom_service', 'private_service'}
+CUSTOM_SERVICES = {'custom_service', 'private_service', 'dm_service'}
 SUPPORTED = {vv for v in MAP.values() for vv in v}.union(CUSTOM_SERVICES)
 
 def get_type_by_mitype(mitype:str):
@@ -88,17 +96,18 @@ class MiotAdapter:
 
     def init_all_services(self) -> None:
         for s in self.spec['services']:
-            if (n := name_by_type(s['type'])) in SUPPORTED:
-                if n != 'fan_control' and n not in CUSTOM_SERVICES:
-                    self.devtypeset.add(get_type_by_mitype(n))
-            if not self.services.get(name_by_type(s['type'])):
-                self.services[name_by_type(s['type'])] = Service(
-                    s['iid'], s['type'], s['description'], self.get_prop_by_siid(s), name_by_type(s['type']), s.get('actions') or [])
+            sid = get_id_by_instance(s)
+            if sid in SUPPORTED:
+                if sid != 'fan_control' and sid not in CUSTOM_SERVICES:
+                    self.devtypeset.add(get_type_by_mitype(sid))
+            if not self.services.get(sid):
+                self.services[sid] = Service(
+                    s['iid'], s['type'], s['description'], self.get_prop_by_siid(s), sid, s.get('actions') or [])
             else:
-                for i in range(2,5):
-                    if not self.services.get(f"{name_by_type(s['type'])}_{i}"):
-                        self.services[f"{name_by_type(s['type'])}_{i}"] = Service(
-                            s['iid'], s['type'], s['description'], self.get_prop_by_siid(s), f"{name_by_type(s['type'])}_{i}", s.get('actions') or [])
+                for i in range(2,9):
+                    if not self.services.get(f"{sid}_{i}"):
+                        self.services[f"{sid}_{i}"] = Service(
+                            s['iid'], s['type'], s['description'], self.get_prop_by_siid(s), f"{sid}_{i}", s.get('actions') or [])
                         break
 
     @property
@@ -107,7 +116,7 @@ class MiotAdapter:
 
     @property
     def mitype(self):
-        return name_by_type(self.spec.get('type'))
+        return get_id_by_instance(self.spec)
 
     @property
     def devtype(self):
@@ -128,8 +137,8 @@ class MiotAdapter:
             return None
         props = {}
         for p in service['properties']:
-            props[name_by_type(p['type'])] = Property(service['iid'],
-                                                      p['iid'], p['type'],p['description'], p['format'], p['access'], name_by_type(p['type']),
+            props[get_id_by_instance(p)] = Property(service['iid'],
+                                                      p['iid'], p['type'],p['description'], p['format'], p['access'], get_id_by_instance(p),
                                                       p.get('unit'),
                                                       p.get('value-list'),
                                                       p.get('value-range'))
@@ -143,7 +152,7 @@ class MiotAdapter:
             return None
         actions = {}
         for a in service.get('actions') or []:
-            actions[name_by_type(a['type'])] = Action(
+            actions[get_id_by_instance(a)] = Action(
                 service['iid'],
                 a['iid'],
                 a['type'],
@@ -245,6 +254,12 @@ class MiotAdapter:
                     ret['speed'] = lst
 
             if p := propdict2.pop('speed_level', None): # dmaker stepless speed
+                if vr := p.vrange:
+                    ret['stepless_speed'] = {
+                        'value_range': vr
+                    }
+
+            if p := propdict2.pop('stepless_fan_level', None): # zhimi stepless speed
                 if vr := p.vrange:
                     ret['stepless_speed'] = {
                         'value_range': vr
@@ -434,9 +449,10 @@ class MiotAdapter:
             ret['a_l'] = action_dict
             self.devtypeset.add('fan')
 
-        if self.mitype == 'air_conditioner' or self.mitype == 'hood':
+        if 'fan_control' in ret:
             try:
-                ret[self.mitype] = {**ret[self.mitype], **ret.pop('fan_control')}
+                to_merge = next(t for t in ('air_conditioner', 'air_condition_outlet', 'hood') if t in ret)
+                ret[to_merge] = {**ret[to_merge], **ret.pop('fan_control')}
             except Exception as ex:
                 pass
 
@@ -454,10 +470,11 @@ class MiotAdapter:
             if 'target_humidity' in ret['environment']:
                 ret['humidifier']['target_humidity'] = (ret['environment'].pop('target_humidity'))
 
-        if 'fan' in ret and 'custom_service' in ret:
-            # zhimi fan stepless speed
-            if 'stepless_speed' in ret['custom_service']:
+        if 'fan' in ret:
+            if 'stepless_speed' in ret.get('custom_service', {}):
                 ret['fan']['stepless_speed'] = (ret['custom_service'].pop('stepless_speed'))
+            if 'stepless_speed' in ret.get('dm_service', {}):
+                ret['fan']['stepless_speed'] = (ret['dm_service'].pop('stepless_speed'))
 
         # 把某个 service 里的 property 单独提出来
         # 例如：晾衣架的烘干，新风机的辅热
@@ -491,9 +508,11 @@ class MiotAdapter:
                         if nid == self.mitype and not has_main:
                             ret[nid]['main'] = True
                             has_main = True
-        if self.mitype == 'air_conditioner' or self.mitype == 'hood':
+
+        if 'fan_control' in ret:
             try:
-                ret[self.mitype] = {**ret[self.mitype], **ret.pop('fan_control')}
+                to_merge = next(t for t in ('air_conditioner', 'air_condition_outlet', 'hood') if t in ret)
+                ret[to_merge] = {**ret[to_merge], **ret.pop('fan_control')}
             except Exception as ex:
                 pass
 
@@ -511,10 +530,11 @@ class MiotAdapter:
             if 'target_humidity' in ret['environment']:
                 ret['humidifier']['target_humidity'] = (ret['environment'].pop('target_humidity'))
 
-        if 'fan' in ret and 'custom_service' in ret:
-            # zhimi fan stepless speed
-            if 'stepless_speed' in ret['custom_service']:
+        if 'fan' in ret:
+            if 'stepless_speed' in ret.get('custom_service', {}):
                 ret['fan']['stepless_speed'] = (ret['custom_service'].pop('stepless_speed'))
+            if 'stepless_speed' in ret.get('dm_service', {}):
+                ret['fan']['stepless_speed'] = (ret['dm_service'].pop('stepless_speed'))
 
         # 把某个 service 里的 property 单独提出来
         # 例如：晾衣架的烘干，新风机的辅热

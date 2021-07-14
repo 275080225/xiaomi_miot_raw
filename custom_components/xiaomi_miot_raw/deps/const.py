@@ -29,6 +29,7 @@ SUPPORTED_DOMAINS = [
     "lock",
     "water_heater",
     "vacuum",
+    "binary_sensor",
 ]
 DEFAULT_NAME = "Xiaomi MIoT Device"
 
@@ -96,6 +97,10 @@ MAP = {
         "filter_2",
         "filter_3",
         "filter_4",
+        "filter_5",
+        "filter_6",
+        "filter_7",
+        "filter_8",
         "health_pot",
         "illumination_sensor",
         "induction_cooker",
@@ -106,9 +111,11 @@ MAP = {
         "oven",
         "plant_monitor",
         "power_consumption",
+        "power_10A_consumption",
         "pressure_cooker",
         "printer",
         "remain_clean_time",
+        "repellent",
         "router",
         "sleep_info",
         "sleep_monitor",
@@ -123,6 +130,11 @@ MAP = {
         "switch_2",
         "switch_3",
         "switch_4",
+        "switch_5",
+        "switch_6",
+        "switch_7",
+        "switch_8",
+        "switch_usb",
         "coffee_machine",
         "fish_tank",
     },
@@ -131,6 +143,10 @@ MAP = {
         "light_2",
         "light_3",
         "light_4",
+        "light_5",
+        "light_6",
+        "light_7",
+        "light_8",
         "ambient_light",
         "ambient_light_custom",
         "plant_light",
@@ -173,7 +189,9 @@ MAP = {
     },
     "climate": {
         "air_conditioner",
+        "air_condition_outlet",
         "heater",
+        "thermostat",
     },
     "lock": {
         "physical_controls_locked",
@@ -187,6 +205,7 @@ MAP = {
     "vacuum": {
         "vacuum",
     },
+    "binary_sensor": {},
 }
 
 UNIT_MAPPING = {

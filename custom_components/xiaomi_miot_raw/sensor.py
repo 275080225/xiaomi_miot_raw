@@ -18,6 +18,7 @@ from .deps.xiaomi_cloud_new import MiCloud
 
 from datetime import timedelta
 from . import GenericMiotDevice, MiotSubDevice, dev_info
+from .binary_sensor import MiotSubBinarySensor
 from .deps.const import (
     DOMAIN,
     CONF_UPDATE_INSTANT,
@@ -36,10 +37,11 @@ from .deps.const import (
     UNIT_MAPPING,
 )
 from .deps.ble_event_parser import (
-    BleEventParser,
+    EventParser,
     BleDoorParser,
     BleLockParser,
-    BleMotionParser,
+    TimestampParser,
+    ZgbIlluminationParser,
 )
 from collections import OrderedDict
 from .deps.miot_coordinator import MiotEventCoordinator
@@ -81,7 +83,10 @@ DEVCLASS_MAPPING = {
 async def async_setup_platform(hass, config, async_add_devices, discovery_info=None):
     """Set up the sensor from config."""
     hass.data.setdefault(DATA_KEY, {})
-    hass.data[DOMAIN]['add_handler'].setdefault(TYPE, async_add_devices)
+    hass.data[DOMAIN]['add_handler'].setdefault(TYPE, {})
+    if 'config_entry' in config:
+        id = f"{config.get(CONF_HOST)}-{config.get(CONF_NAME)}"
+        hass.data[DOMAIN]['add_handler'][TYPE].setdefault(id, async_add_devices)
 
     host = config.get(CONF_HOST)
     token = config.get(CONF_TOKEN)
@@ -97,14 +102,14 @@ async def async_setup_platform(hass, config, async_add_devices, discovery_info=N
             di['fw_version'],
             ""
         )
-        devices = [MiotEventBasedSensor(None, config, device_info, hass, item) for item in mapping.items()]
-
+        sensor_devices = [MiotEventBasedSensor(None, config, device_info, hass, item) for item in mapping.items()]
+        hass.data[DOMAIN]['miot_main_entity'][f'{host}-{config.get(CONF_NAME)}'] = sensor_devices[0]
         # device = MiotEventBasedSensor(None, config, device_info, hass, params['eb_type'])
         # devices = [device]
         # _LOGGER.info(f"{params['eb_type']} is the main device of {host}.")
         # hass.data[DOMAIN]['miot_main_entity'][f'{host}-{config.get(CONF_NAME)}'] = device
         # hass.data[DOMAIN]['entities'][device.unique_id] = device
-        async_add_devices(devices, update_before_add=True)
+        async_add_devices(sensor_devices, update_before_add=True)
         return True
 
     mappingnew = {}
@@ -168,29 +173,53 @@ async def async_setup_platform(hass, config, async_add_devices, discovery_info=N
                         ""
                     )
         device = MiotSensor(miio_device, config, device_info, hass, main_mi_type)
-        devices = [device]
+        sensor_devices = [device]
+        binary_devices = []
         _LOGGER.info(f"{main_mi_type} is the main device of {host}.")
         hass.data[DOMAIN]['miot_main_entity'][f'{host}-{config.get(CONF_NAME)}'] = device
         hass.data[DOMAIN]['entities'][device.unique_id] = device
         if main_mi_type:
-            if params[main_mi_type].get('show_individual_sensor'):
-                for k in mappingnew.keys():
-                    if k in paramsnew:
-                        unit = paramsnew[k].get('unit')
-                        format_ = paramsnew[k].get('format')
-                    else:
-                        unit = format_ = None
-
-                    devices.append(MiotSubSensor(
+            for k in mappingnew.keys():
+                if 'a_l_' in k:
+                    continue
+                if k in paramsnew:
+                    unit = paramsnew[k].get('unit')
+                    format_ = paramsnew[k].get('format')
+                else:
+                    unit = format_ = None
+                if format_ != 'bool':
+                    sensor_devices.append(MiotSubSensor(
                         device, mappingnew, paramsnew, main_mi_type,
                         {'sensor_property': k, CONF_SENSOR_UNIT: unit}
                     ))
-        async_add_devices(devices, update_before_add=True)
+                else:
+                    binary_devices.append(MiotSubBinarySensor(
+                        device, mappingnew, paramsnew, main_mi_type,
+                        {'sensor_property': k}
+                    ))
+        async_add_devices(sensor_devices, update_before_add=True)
+        if binary_devices:
+            retry_time = 1
+            while True:
+                if 'binary_sensor' in hass.data[DOMAIN]['add_handler']:
+                    if f"{host}-{config.get(CONF_NAME)}" in hass.data[DOMAIN]['add_handler']['binary_sensor']:
+                        break
+                retry_time *= 2
+                if retry_time > 120:
+                    _LOGGER.error(f"Cannot create binary sensor for {config.get(CONF_NAME)}({host}) !")
+                    raise PlatformNotReady
+                else:
+                    _LOGGER.debug(f"Waiting for binary sensor of {config.get(CONF_NAME)}({host}) ({retry_time - 1} seconds).")
+                    await asyncio.sleep(retry_time)
+
+            hass.data[DOMAIN]['add_handler']['binary_sensor'][f"{host}-{config.get(CONF_NAME)}"](binary_devices, update_before_add=True)
 
     if other_mi_type:
         retry_time = 1
         while True:
             if parent_device := hass.data[DOMAIN]['miot_main_entity'].get(f'{host}-{config.get(CONF_NAME)}'):
+                if isinstance(parent_device, MiotSensor):
+                    return
                 break
             else:
                 retry_time *= 2
@@ -209,12 +238,12 @@ async def async_setup_platform(hass, config, async_add_devices, discovery_info=N
             if k in MAP[TYPE]:
                 for kk,vv in v.items():
                     paramsnew[f"{k[:10]}_{kk}"] = vv
-        devices = []
+        sensor_devices = []
         for k in mappingnew.keys():
-            devices.append(MiotSubSensor(parent_device, mappingnew, paramsnew, other_mi_type[0],{'sensor_property': k}))
+            sensor_devices.append(MiotSubSensor(parent_device, mappingnew, paramsnew, other_mi_type[0],{'sensor_property': k}))
 
         # device = MiotSubSensor(parent_device, "switch_switch_status")
-        async_add_devices(devices, update_before_add=True)
+        async_add_devices(sensor_devices, update_before_add=True)
 
 
 async def async_setup_entry(hass, config_entry, async_add_entities):
@@ -257,6 +286,10 @@ class MiotSubSensor(MiotSubDevice):
     def __init__(self, parent_device, mapping, params, mitype, others={}):
         super().__init__(parent_device, mapping, params, mitype)
         self._sensor_property = others.get('sensor_property')
+        self._name_suffix = self._sensor_property.replace('_', ' ').capitalize()
+        if self._sensor_property in params:
+            if params[self._sensor_property].get('name'):
+                self._name_suffix = params[self._sensor_property]['name']
         self.entity_id = f"{DOMAIN}.{parent_device._entity_id}-{others.get('sensor_property').split('_')[-1]}"
         try:
             if u := others.get(CONF_SENSOR_UNIT):
@@ -302,11 +335,6 @@ class MiotSubSensor(MiotSubDevice):
         """Return an unique ID."""
         return f"{self._parent_device.unique_id}-{self._sensor_property}"
 
-    @property
-    def name(self):
-        """Return the name of this entity, if any."""
-        return f"{self._parent_device.name} {self._sensor_property.replace('_', ' ').capitalize()}"
-
 class MiotEventBasedSensor(Entity):
     def __init__(self, device, config, device_info, hass = None, event_item = None):
         """event_item 形如: {'motion':{'key':1, 'type':'prop'}}"""
@@ -340,6 +368,7 @@ class MiotEventBasedSensor(Entity):
         self._name = config.get(CONF_NAME)
 
         self._model = device_info.model
+        self._host = config.get(CONF_HOST)
         self._unique_id = f"{device_info.model.split('.')[-1]}-event-{config.get(CONF_CLOUD)['did'][-6:]}-{self._event_item[0]}"
         self._device_identifier = f"{device_info.model.split('.')[-1]}-event-{config.get(CONF_CLOUD)['did'][-6:]}"
         if config.get('ett_id_migrated'):
@@ -433,7 +462,8 @@ class MiotEventBasedSensor(Entity):
         self._state_attrs = {
             ATTR_MODEL: self._model,
         }
-        self._state_attrs.update(statedict)
+        if statedict:
+            self._state_attrs.update(statedict)
         self.async_write_ha_state()
         self.publish_updates()
 
@@ -458,9 +488,18 @@ class MiotEventBasedSensor(Entity):
                 MiotEventBasedSubSensor(self, {
                     'id': 'last_triggered',
                     'name': '上次触发',
-                    'data_processor': BleMotionParser,
+                    'data_processor': TimestampParser,
                     'property': 'friendly_time',
                     'icon': 'mdi:history',
+                })
+            )
+            ett_to_add.append(
+                MiotEventBasedSubSensor(self, {
+                    'id': 'illumination',
+                    'name': 'Illumination',
+                    'data_processor': ZgbIlluminationParser,
+                    'property': 'illumination',
+                    'icon': 'mdi:white-balance-sunny',
                 })
             )
         elif k == 7:
@@ -520,7 +559,7 @@ class MiotEventBasedSensor(Entity):
                 })
             )
 
-        self._hass.data[DOMAIN]['add_handler']['sensor'](ett_to_add, update_before_add=True)
+        self._hass.data[DOMAIN]['add_handler']['sensor'][f"{self._host}-{self._name}"](ett_to_add, update_before_add=True)
 
 class MiotEventBasedSubSensor(Entity):
     def __init__(self, parent_sensor, options):
